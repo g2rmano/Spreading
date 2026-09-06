@@ -101,6 +101,47 @@ ORGANIZATION_ACTOR_EXPR = (
 )
 
 
+# Link publicado: a única leitura anônima que o produto precisa ter.
+#
+# `redirect_curto` e `redirect_rastreado` respondem a quem clicou numa mensagem e
+# não tem sessão, logo não passam pelo OrganizationContextMiddleware e não têm
+# `app.organization_id`. Com as duas tabelas em STRICT, a linha ficava invisível e
+# TODO link publicado respondia 404 — a receita morria em silêncio, e a suíte não
+# via nada porque roda em SQLite, onde não há RLS.
+#
+# A saída não é afrouxar a policy nem dar contexto de sistema ao gunicorn (a role
+# de runtime não pode abrir contexto cross-tenant, e isso é proteção, não
+# descuido). É um contexto próprio, assinado pelo mesmo HMAC dos outros, que
+# libera EXATAMENTE a linha cujo identificador o visitante já apresentou na URL —
+# e só se ela já foi publicada.
+def public_link_expr(prefix: str = "") -> str:
+    if prefix and not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", prefix):
+        raise ValueError(f"Prefixo de tabela inválido: {prefix!r}")
+    col = f"{prefix}." if prefix else ""
+    valor = "NULLIF(current_setting('app.public_link', true), '')"
+    return (
+        "("
+        f"{col}status = 'enviado' "
+        f"AND {valor} IS NOT NULL "
+        f"AND ({col}slug_curto = {valor} OR {col}id_publico::text = {valor}) "
+        "AND (SELECT tenant_security.context_valid("
+        f"'public_link', {valor}, "
+        "current_setting('app.public_link_signature', true)"
+        "))"
+        ")"
+    )
+
+
+PUBLIC_LINK_EXPR = public_link_expr()
+
+# O clique é escrito pela mesma request anônima. Não basta o contexto ser válido:
+# a linha inserida tem de apontar para a publicação que o contexto libera.
+CLIQUE_PUBLIC_LINK_EXPR = (
+    "(EXISTS (SELECT 1 FROM scrapers_publicacao pub "
+    f"WHERE pub.id = publicacao_id AND {public_link_expr('pub')}))"
+)
+
+
 def _role_literal(role: str) -> str:
     if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", str(role or "")):
         raise ValueError(f"Nome de role PostgreSQL inválido: {role!r}")
@@ -149,6 +190,15 @@ def policy_statements(
         # compartilhada. O actor assinado pode ler/escrever somente a própria linha;
         # a validação de active_organization ainda exige Membership ativa.
         writable = f"(({system}) OR {ORG_EXPR} OR {ACTOR_EXPR})"
+    elif table == "scrapers_publicacao":
+        # Leitura anônima do link publicado; escrita segue exigindo tenant.
+        visible = f"(({system}) OR {ORG_EXPR} OR {PUBLIC_LINK_EXPR})"
+        writable = f"(({system}) OR {ORG_EXPR})"
+    elif table == "scrapers_cliquepublicacao":
+        # O clique nasce da mesma request anônima; a leitura dele continua sendo
+        # do dono. Só o INSERT ganha a porta, e amarrada à publicação liberada.
+        visible = f"(({system}) OR {ORG_EXPR})"
+        writable = f"(({system}) OR {ORG_EXPR} OR {CLIQUE_PUBLIC_LINK_EXPR})"
     else:
         # O catálogo compartilhado é quase todo público. Colocá-lo primeiro
         # evita até o InitPlan de assinatura para essas linhas; para as privadas,

@@ -22,7 +22,7 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
-from apps.accounts.tenant import organization_thread_target
+from apps.accounts.tenant import organization_thread_target, public_link_context
 from apps.scrapers.models import (
     CliquePublicacao, ConfiguracaoEnvio, Cupom, LinkAfiliadoUsuario, Produto,
     Publicacao, ReceitaAfiliado, RelatorioSync, FonteIngestao, CupomNormalizado,
@@ -366,20 +366,27 @@ def redirect_rastreado(request, token):
     """Formato antigo (token assinado): mantém válidos os links já publicados."""
     try:
         payload = signing.loads(token, salt="click")
-        publicacao = Publicacao.objects.get(id_publico=payload["p"], status="enviado")
-    except (signing.BadSignature, KeyError, Publicacao.DoesNotExist):
+    except (signing.BadSignature, KeyError):
         return HttpResponse("Link inválido ou indisponível.", status=404)
-    return _responder_clique(publicacao)
+    # A busca e o registro do clique moram DENTRO do contexto: quem clica não tem
+    # sessão, e sem ele a RLS esconde a linha e o link publicado responde 404.
+    with public_link_context(payload.get("p")):
+        try:
+            publicacao = Publicacao.objects.get(id_publico=payload["p"], status="enviado")
+        except (KeyError, ValueError, Publicacao.DoesNotExist):
+            return HttpResponse("Link inválido ou indisponível.", status=404)
+        return _responder_clique(publicacao)
 
 
 @login_not_required
 def redirect_curto(request, slug):
     """Formato curto (/r/<slug>/) que entra nas mensagens novas."""
-    try:
-        publicacao = Publicacao.objects.get(slug_curto=slug, status="enviado")
-    except Publicacao.DoesNotExist:
-        return HttpResponse("Link inválido ou indisponível.", status=404)
-    return _responder_clique(publicacao)
+    with public_link_context(slug):
+        try:
+            publicacao = Publicacao.objects.get(slug_curto=slug, status="enviado")
+        except Publicacao.DoesNotExist:
+            return HttpResponse("Link inválido ou indisponível.", status=404)
+        return _responder_clique(publicacao)
 
 
 @require_POST

@@ -287,6 +287,42 @@ def system_context():
             pass
 
 
+@contextmanager
+def public_link_context(identificador):
+    """Libera a leitura de UMA publicação já enviada para um visitante anônimo.
+
+    Existe porque o clique num link publicado chega sem sessão: o
+    OrganizationContextMiddleware devolve cedo, nenhum GUC de organização é
+    instalado, e as duas tabelas envolvidas são STRICT — a linha some e o
+    redirect responde 404 para todo link que o sistema já mandou.
+
+    Não é `system_context` disfarçado. A role de runtime do gunicorn não pode
+    abrir contexto cross-tenant (`_assert_privileged_database_role`), e não é isso
+    que se quer: o visitante não deve enxergar o tenant, só a linha cujo
+    identificador ele já apresentou na URL. A policy correspondente está em
+    `rls.py` (`public_link_expr`) e exige `status='enviado'`.
+
+    `local=TRUE` dentro de `atomic` é obrigatório, não estilo: `CONN_MAX_AGE` é
+    600s, a conexão volta ao pool e um GUC de sessão sobreviveria para a próxima
+    request — que pode ser de outra pessoa.
+    """
+    valor = str(identificador or "")
+    if not valor or connection.vendor != "postgresql":
+        yield
+        return
+    assinatura = _context_signature("public_link", valor)
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT set_config('app.public_link', %s, TRUE),
+                       set_config('app.public_link_signature', %s, TRUE)
+                """,
+                [valor, assinatura],
+            )
+        yield
+
+
 def system_job(func):
     """Marca um management command inteiro como operação global explícita."""
     @wraps(func)
