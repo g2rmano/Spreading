@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
     extrairMensagemId, opcoesDeEnvio, erroFrameDestacado, erroContextoDestruido,
+    ackConfirmaEnvio,
     erroReloadEmVoo, confirmarMensagem, repetirSeFrameDestacado,
     desfechoDeEnvioAceito,
 } = require('../message_confirmation');
@@ -112,4 +113,26 @@ test('envio com ID nativo mantém o mesmo desfecho e preserva o Wid', () => {
     assert.equal(desfecho.resultado, 'confirmado');
     assert.equal(desfecho.confirmacao, 'nativa');
     assert.equal(desfecho.mensagem_id, 'true_123@g.us_ABC');
+});
+
+test('le o id serializado sob o nome novo do WhatsApp Web ($1)', () => {
+    // Em julho de 2026 o WhatsApp Web renomeou `_serialized` para `$1`
+    // (whatsapp-web.js#201849). Quem so lia o nome antigo passou a tratar TODO
+    // envio como "sem id nativo": inventava um id local, nao tinha como casar o
+    // ACK, e anunciava confirmado o que o WhatsApp nunca confirmou.
+    assert.equal(extrairMensagemId({ id: { $1: 'true_123@g.us_XYZ' } }), 'true_123@g.us_XYZ');
+    assert.equal(
+        extrairMensagemId({ _data: { id: { $1: 'false_55@c.us_QWE' } } }),
+        'false_55@c.us_QWE',
+    );
+});
+
+test('so ACK de servidor para cima conta como prova de envio', () => {
+    assert.equal(ackConfirmaEnvio(1), true);   // servidor
+    assert.equal(ackConfirmaEnvio(2), true);   // aparelho
+    assert.equal(ackConfirmaEnvio(3), true);   // lida
+    assert.equal(ackConfirmaEnvio(0), false);  // pendente: e o "Waiting for this message"
+    assert.equal(ackConfirmaEnvio(-1), false); // erro
+    assert.equal(ackConfirmaEnvio(null), false);
+    assert.equal(ackConfirmaEnvio(undefined), false);
 });

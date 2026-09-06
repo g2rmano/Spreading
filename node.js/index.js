@@ -34,7 +34,7 @@ const {
 } = require('./payloads');
 const {
     confirmarMensagem, desfechoDeEnvioAceito, erroReloadEmVoo, opcoesDeEnvio,
-    repetirSeFrameDestacado,
+    repetirSeFrameDestacado, extrairMensagemId, ackConfirmaEnvio,
 } = require('./message_confirmation');
 const {
     TRANSITORIO, PERMANENTE, erroClassificado, classificarErro, erroStoreQuebrado,
@@ -606,6 +606,11 @@ const createSessionState = (instanceId, organizationId = '') => ({
     // para decidir abandono — o painel aberto e o proprio loop do Django renovam
     // `requestedAt` sem que ninguem tenha pareado nada.
     qrDesde: null,
+    // ACK do WhatsApp por mensagem enviada. `acksVistos` guarda o que chegou
+    // antes de alguem esperar (o evento pode preceder a resolucao do
+    // sendMessage); `acksEsperando` sao os envios em voo aguardando prova.
+    acksVistos: new Map(),
+    acksEsperando: new Map(),
     gruposCache: [],
     gruposCarregados: false,
     gruposSincronizando: false,
@@ -1972,6 +1977,13 @@ const initializeSession = (session) => {
         tratarQuedaDeEstado(session, client, estado, 'change_state');
     });
 
+    // Prova de que a mensagem saiu daqui. Registrado no cliente (e nao por envio)
+    // porque o evento pode chegar ANTES de o sendMessage resolver.
+    client.on('message_ack', (mensagem, ack) => {
+        if (session.client !== client) return;
+        registrarAck(session, extrairMensagemId(mensagem), ack);
+    });
+
     client.on('disconnected', async (reason) => {
         if (session.client !== client) return;
         const faseAnterior = session.fase;
@@ -2117,6 +2129,55 @@ const initializeSession = (session) => {
     });
 
     return session;
+};
+
+// ── Confirmacao por ACK ───────────────────────────────────────────────
+//
+// O `sendMessage` resolver NAO prova entrega. Em julho de 2026 o WhatsApp Web
+// renomeou o id serializado de `_serialized` para `$1`; quem so lia o nome
+// antigo passou a achar que todo envio voltava sem id, inventava um id local e
+// declarava "envio confirmado" para uma mensagem que o WhatsApp nunca aceitou —
+// o grupo via "Waiting for this message" (issue #201849). A unica prova de que a
+// mensagem saiu daqui e o ACK: -1 erro, 0 pendente, 1 servidor, 2 aparelho,
+// 3 lida. Confirmamos a partir de 1.
+const ACK_ESPERA_MS = parseInt(process.env.WA_ACK_TIMEOUT_MS, 10) || 20000;
+// Teto do cache de ACKs ja vistos. So existe para cobrir a corrida em que o
+// evento chega antes de o sendMessage resolver; nao e historico.
+const ACKS_LEMBRADOS = 200;
+
+const registrarAck = (session, mensagemId, ack) => {
+    if (!mensagemId) return;
+    const espera = session.acksEsperando.get(mensagemId);
+    if (espera) {
+        session.acksEsperando.delete(mensagemId);
+        espera(ack);
+        return;
+    }
+    session.acksVistos.set(mensagemId, ack);
+    if (session.acksVistos.size > ACKS_LEMBRADOS) {
+        // Map preserva ordem de insercao: o mais antigo sai primeiro.
+        session.acksVistos.delete(session.acksVistos.keys().next().value);
+    }
+};
+
+const esperarAck = (session, mensagemId, prazoMs) => {
+    if (!mensagemId || prazoMs <= 0) return Promise.resolve(null);
+    if (session.acksVistos.has(mensagemId)) {
+        const ack = session.acksVistos.get(mensagemId);
+        session.acksVistos.delete(mensagemId);
+        return Promise.resolve(ack);
+    }
+    return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+            session.acksEsperando.delete(mensagemId);
+            resolve(null);
+        }, prazoMs);
+        timer.unref();
+        session.acksEsperando.set(mensagemId, (ack) => {
+            clearTimeout(timer);
+            resolve(ack);
+        });
+    });
 };
 
 const sessoesOcupandoSlot = () => Array.from(sessions.values()).filter(ocupaSlot).length;
@@ -2471,6 +2532,7 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
                 'sendMessage'
             );
         }
+        const transporteMs = duracao();
         const confirmacao = confirmarMensagem(enviada, session.id);
         if (confirmacao.confirmacao !== 'nativa') {
             // Não é falha: sendMessage resolveu e a mensagem foi aceita pelo WA
@@ -2484,18 +2546,46 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
         session.lastSendAt = Date.now();
         // Uma midia que sobe zera a suspeita: os stalls so contam quando SEGUIDOS.
         session.stallsSeguidos = 0;
-        console.log(`[${session.id}] Envio confirmado: ${confirmacao.mensagemId} -> ${maskedIdentifier(chatId)}`);
+
+        // Espera pelo ACK: é a única prova de que a mensagem saiu daqui, e é o
+        // que dá o instante real da entrega em vez de "o sendMessage voltou".
+        // Ausência de ACK NÃO vira falha — a mensagem chega mesmo assim, às
+        // vezes bem depois; vira um desfecho declarado como não confirmado, com
+        // o tempo que se esperou. Mentir de qualquer um dos dois lados é pior.
+        const inicioAck = Date.now();
+        const prazoAck = Math.max(0, Math.min(ACK_ESPERA_MS, restante(prazo)));
+        const ack = confirmacao.confirmacao === 'nativa'
+            ? await esperarAck(session, confirmacao.mensagemId, prazoAck)
+            : null;
+        const ackMs = confirmacao.confirmacao === 'nativa' ? Date.now() - inicioAck : null;
+        const confirmadoPorAck = ackConfirmaEnvio(ack);
+        const enviadoEm = new Date().toISOString();
+
+        registrarLifecycle(session, 'send_concluido', {
+            confirmacao: confirmadoPorAck ? 'ack' : confirmacao.confirmacao,
+            ack,
+            ack_ms: ackMs,
+            transporte_ms: transporteMs,
+            tipo,
+        });
+        console.log(
+            `[${session.id}] Envio ${confirmadoPorAck ? 'confirmado pelo WhatsApp' : 'aceito (sem ACK ainda)'}`
+            + ` em ${transporteMs}ms`
+            + (confirmadoPorAck ? ` (+${ackMs}ms até o ACK ${ack})` : '')
+            + `: ${confirmacao.mensagemId} -> ${maskedIdentifier(chatId)}`
+        );
         return {
             // Ver desfechoDeEnvioAceito: sendMessage que resolve é entrega aceita,
             // com ou sem ID nativo. A ausência do ID é telemetria (`confirmacao`).
             ...desfechoDeEnvioAceito(confirmacao),
+            confirmacao: confirmadoPorAck ? 'ack' : confirmacao.confirmacao,
             via: 'local',
             tipo,
             instancia: session.id,
-            // Na variante "aceita_sem_id", enviada e undefined por definição.
-            // ACK é telemetria opcional; jamais pode transformar um envio aceito
-            // em erro depois que já chegou ao grupo.
-            ack: Number.isInteger(enviada?.ack) ? enviada.ack : null,
+            ack: Number.isInteger(ack) ? ack : null,
+            ack_ms: ackMs,
+            transporte_ms: transporteMs,
+            enviado_em: enviadoEm,
             etapa,
             duracao_ms: duracao(),
         };

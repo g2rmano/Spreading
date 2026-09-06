@@ -35,6 +35,50 @@ from apps.scrapers.scraper_mercadolivre.scraper import main as scrapper_main
 logger = logging.getLogger(__name__)
 
 
+def _resumo_do_envio(resultado, o_que="Oferta") -> str:
+    """Uma linha dizendo QUANDO saiu, QUANTO demorou e se o WhatsApp confirmou.
+
+    "Enviado" sozinho não é informação: o transporte pode levar segundos (upload
+    de mídia dentro do Chromium) e o ACK do WhatsApp pode chegar depois disso. A
+    tela precisa distinguir "o WhatsApp confirmou" de "aceitou e ainda não
+    confirmou" — os dois são resultados legítimos, e tratá-los como a mesma coisa
+    foi o que fez um envio lento parecer um envio perdido.
+    """
+    from django.utils import timezone as _tz
+    from django.utils.dateparse import parse_datetime
+
+    partes = [f"{o_que} enviada" if o_que == "Oferta" else f"{o_que} enviado"]
+
+    carimbo = resultado.get("enviado_em") or ""
+    momento = _tz.localtime()
+    if carimbo:
+        analisado = parse_datetime(carimbo)
+        if analisado is not None:
+            momento = _tz.localtime(analisado)
+    partes.append(f"às {momento.strftime('%H:%M:%S')}")
+
+    transporte_ms = resultado.get("transporte_ms") or resultado.get("duracao_ms") or 0
+    if transporte_ms:
+        partes.append(f"em {transporte_ms / 1000:.1f}s")
+
+    if resultado.get("confirmacao") == "ack":
+        ack_ms = resultado.get("ack_ms")
+        confirmacao = "confirmado pelo WhatsApp"
+        if ack_ms:
+            confirmacao += f" após {ack_ms / 1000:.1f}s"
+        partes.append(f"— {confirmacao}")
+    else:
+        partes.append("— aceito pelo WhatsApp, confirmação ainda não chegou")
+
+    via = resultado.get("via")
+    if via:
+        partes.append(f"(via {via})")
+    link = resultado.get("link")
+    if link:
+        partes.append(f"Link: {link}")
+    return " ".join(partes)
+
+
 def _send_pipeline_v2_enabled(user) -> bool:
     from apps.accounts.feature_flags import send_pipeline_v2_enabled
     return send_pipeline_v2_enabled(user)
@@ -1965,7 +2009,11 @@ def enviar_produto_stream(request):
         if not prod:
             print("[ERRO] Produto não encontrado.")
             return
-        print(f"Enviando '{prod.nome[:60]}' → {grupo_nome or grupo_id} ({canal})...")
+        from django.utils import timezone as _tz
+        print(f"[{_tz.localtime().strftime('%H:%M:%S')}] Enviando "
+              f"'{prod.nome[:60]}' → {grupo_nome or grupo_id} ({canal})…")
+        if canal == "whatsapp":
+            print("Subindo a imagem pelo WhatsApp Web; mídia leva alguns segundos.")
         try:
             r = enviar_oferta_de_produto(
                 prod, grupo_id, verificar=True, canal=canal, usuario=usuario,
@@ -1997,7 +2045,7 @@ def enviar_produto_stream(request):
         if r.get("queued"):
             print("__QUEUED__ OK Envio reservado; acompanhe o resultado no painel de falhas.")
         elif r.get("sucesso"):
-            print(f"__SENT__ OK Enviado (via {r.get('via')}). Link: {r.get('link')}")
+            print(f"__SENT__ OK {_resumo_do_envio(r)}")
         else:
             print(f"[ERRO] {r.get('motivo')}")
             if r.get("precisa_login_ml"):
@@ -2098,7 +2146,7 @@ def enviar_cupom_stream(request):
         if resultado.get("queued"):
             print("__QUEUED__ OK Cupom reservado; o worker fará a preparação e o transporte.")
         elif resultado.get("sucesso"):
-            print(f"__SENT__ OK Cupom enviado (via {resultado.get('via', canal)}).")
+            print(f"__SENT__ OK {_resumo_do_envio(resultado, o_que='Cupom')}")
         else:
             print(f"[ERRO] {resultado.get('motivo') or 'falha ao enviar o cupom'}")
             if resultado.get("precisa_login_ml"):

@@ -14,7 +14,12 @@ const extrairMensagemId = (mensagem) => {
     for (const candidato of candidatos) {
         if (typeof candidato === 'string' && candidato.trim()) return candidato;
         if (!candidato || typeof candidato !== 'object') continue;
-        for (const campo of ['_serialized', 'id', 'key']) {
+        // '$1' entrou na lista porque o WhatsApp Web renomeou o campo em julho de
+        // 2026 (issue #201849 do whatsapp-web.js): quem só lia `_serialized`
+        // passou a achar que TODO envio voltava sem ID. Aqui isso não virava
+        // falha — virava um id local inventado e um "envio confirmado" que o
+        // WhatsApp nunca confirmou.
+        for (const campo of ['_serialized', '$1', 'id', 'key']) {
             if (typeof candidato[campo] === 'string' && candidato[campo].trim()) {
                 return candidato[campo];
             }
@@ -22,6 +27,15 @@ const extrairMensagemId = (mensagem) => {
     }
     return null;
 };
+
+// Níveis de ACK do WhatsApp Web. Só a partir de SERVIDOR existe prova de que a
+// mensagem saiu daqui; PENDENTE é o estado em que ela fica quando o aparelho não
+// consegue decifrá-la e o grupo vê "Waiting for this message".
+const ACK_ERRO = -1;
+const ACK_PENDENTE = 0;
+const ACK_SERVIDOR = 1;
+
+const ackConfirmaEnvio = (ack) => Number.isInteger(ack) && ack >= ACK_SERVIDOR;
 
 // Não use `waitUntilMsgSent` aqui. Na versão atual do WhatsApp Web, esperar o
 // ACK mantém o evaluate aberto durante uma recarga silenciosa da página e pode
@@ -112,6 +126,7 @@ const desfechoDeEnvioAceito = (confirmacao) => ({
 });
 
 module.exports = {
+    ACK_ERRO, ACK_PENDENTE, ACK_SERVIDOR, ackConfirmaEnvio,
     extrairMensagemId, opcoesDeEnvio, erroFrameDestacado, erroContextoDestruido,
     erroReloadEmVoo, confirmarMensagem, repetirSeFrameDestacado,
     desfechoDeEnvioAceito,

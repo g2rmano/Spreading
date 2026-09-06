@@ -2715,13 +2715,42 @@ def anotacao_preco_publicado():
     Existe para que haja UMA definição de "preço publicado". A tela mostrava
     `preco_com_cupom` enquanto a mensagem publicava `preco_publicavel()`, e o item
     aparecia com um valor na lista e saía com outro no WhatsApp.
+
+    O ML tem porteiro próprio, o mesmo de `_preco_cupom_inline_ml`: o terceiro
+    preço só conta com a evidência direta do card/PDP. Sem esta condição a
+    anotação era `min(vitrine, efetivo)` para todo mundo, e um `preco_efetivo`
+    de cupom que já expirou fazia a lista mostrar R$ 93,60 enquanto a mensagem
+    publicava os R$ 117 da vitrine — a divergência que esta função existe para
+    impedir.
+
+    Diferença residual conhecida: o Python também exige que
+    `coupon_final_price` bata com `preco_efetivo` (1 centavo de folga). Quem
+    grava a evidência escreve os dois juntos (`_evidencia_oferta`,
+    `_aplicar_cupom_ml`), então a condição só separaria linha corrompida;
+    comparar número dentro de JSON muda de forma entre SQLite e Postgres e não
+    vale o risco no filtro da vitrine.
     """
-    from django.db.models import F, FloatField, Value
+    from django.db.models import Case, F, FloatField, Q, Value, When
     from django.db.models.functions import Coalesce, Least, NullIf
 
-    return Least(
+    pos_cupom = Least(
         F("preco_com_cupom"),
         Coalesce(NullIf(F("preco_efetivo"), Value(0.0)), F("preco_com_cupom")),
+        output_field=FloatField(),
+    )
+    # Sem negação de propósito: `~Q(...)` sobre chave de JSON ausente vira NULL e
+    # a linha cairia no `default`, que é justamente o ramo errado para o ML.
+    cupom_inline_ml = Q(
+        marketplace="mercadolivre",
+        evidencia__promotion__coupon_confirmed=True,
+    ) & (
+        Q(evidencia__promotion__source="offer-card")
+        | Q(evidencia__promotion__source="pdp-live")
+    )
+    return Case(
+        When(cupom_inline_ml, then=pos_cupom),
+        When(marketplace="mercadolivre", then=F("preco_com_cupom")),
+        default=pos_cupom,
         output_field=FloatField(),
     )
 
@@ -3759,6 +3788,15 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                     "repetir": resultado.get("repetir", False),
                     "etapa": resultado.get("etapa", "transporte"),
                     "duracao_ms": resultado.get("duracao_ms", 0),
+                    # Como o transporte terminou, e não só que terminou. `ack` é a
+                    # prova do WhatsApp de que a mensagem saiu daqui; sem ela o
+                    # envio foi aceito mas ainda não confirmado, e a tela precisa
+                    # dizer qual dos dois foi.
+                    "confirmacao": resultado.get("confirmacao", ""),
+                    "ack": resultado.get("ack"),
+                    "ack_ms": resultado.get("ack_ms"),
+                    "transporte_ms": resultado.get("transporte_ms"),
+                    "enviado_em": resultado.get("enviado_em", ""),
                     "publicacao": publicacao}
         # `classe` decide se esta falha conta contra a config (ver
         # processar_configs_de_envio). Sem propagá-la aqui, toda falha de envio
