@@ -46,9 +46,32 @@ class MacroDoNomeTests(SimpleTestCase):
             macro_do_nome("Compressor Portátil Digital Calibrador De Pneu"),
             "Automotivo")
 
-    def test_ambiguidade_real_fica_sem_macro(self):
-        """vedacao(Ferramentas) x processador(Eletronicos): nao da para afirmar."""
-        self.assertEqual(macro_do_nome("2 Anéis De Vedação Para Processador"), "")
+    def test_qualificador_no_fim_nao_manda_no_resultado(self):
+        """A cabeca do nome decide; o que vem depois e complemento.
+
+        Auditoria de 25 nomes reais em 06/09/2026: 1 em cada 4 ia para a macro
+        errada porque a ultima palavra vencia a primeira. Uma lanterna virava
+        material eletrico por causa de "Bateria" no fim, e um oculos de natacao
+        virava jardim por causa de "Piscina".
+        """
+        # "Anel de vedacao" e peca de manutencao; "processador" e complemento.
+        self.assertEqual(macro_do_nome("2 Anéis De Vedação Para Processador"),
+                         "Ferramentas e Manutenção")
+        # "bateria" no fim nao transforma lanterna em material eletrico
+        self.assertEqual(
+            macro_do_nome("Lanterna Tática Voxo Militar T9 Zoom Potente Bateria"), "")
+        # "piscina" no fim nao transforma oculos de natacao em jardim
+        self.assertEqual(macro_do_nome("Óculos Natação Hero Band Mergulho Piscina"),
+                         "Esportes e Fitness")
+        # a quantidade que abre o anuncio nao gasta a janela
+        self.assertEqual(macro_do_nome("50 Sacolas Plástica Premium Boca De Palhaço"),
+                         "Embalagens e Descartáveis")
+
+    def test_termo_composto_pode_terminar_fora_da_cabeca(self):
+        """Comecar na cabeca basta; cortar no limite seco perdia a resposta certa."""
+        self.assertEqual(
+            macro_do_nome("Compressor Portátil Digital Calibrador De Pneu"),
+            "Automotivo")
 
     def test_nome_sem_sinal_fica_sem_macro(self):
         self.assertEqual(macro_do_nome("2 Gh - Ghmuscle"), "")

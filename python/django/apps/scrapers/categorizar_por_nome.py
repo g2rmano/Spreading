@@ -55,7 +55,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "celular", "celulares", "smartphone", "smartphones", "iphone", "galaxy",
         "redmi", "motorola", ("smartwatch", 3), ("smartband", 3), "chip",
         "capinha", "capa de celular", "pelicula", "carregador", "powerbank",
-        "fone de ouvido", "airpods", "airtag",
+        "fone de ouvido", "airpods",
     ),
     "Eletrônicos e Informática": (
         "notebook", "laptop", "computador", "desktop", "monitor", "teclado",
@@ -89,6 +89,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "panela", "frigideira", "talher", "talheres", "prato", "copo", "taca",
         "caneca", "garrafa termica", "jogo de jantar", "faqueiro", "assadeira",
         "escorredor", "pote hermetico", "marmita", "churrasqueira", "espetinho",
+        "galheteiro", "saleiro", "bandeja",
     ),
     "Limpeza e Lavanderia": (
         "detergente", "sabao", "amaciante", "desinfetante", "agua sanitaria",
@@ -110,6 +111,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
     "Materiais Elétricos e Componentes": (
         "lampada", "reator", "disjuntor", "tomada", "interruptor", "fita led",
         "refletor", "extensao eletrica", "filtro de linha", "pilha", "bateria",
+        "soquete", "e27", "plafon",
         "placa solar", "inversor", "fio eletrico",
     ),
     "Jardim, Piscina e Área Externa": (
@@ -168,7 +170,8 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "halter", "haltere", "anilha", "barra de supino", "esteira ergometrica",
         "bicicleta ergometrica", "corda de pular", "colchonete", "tapete de yoga",
         "bola de futebol", "chuteira", "luva de boxe", "skate", "patins",
-        "prancha de equilibrio", "elastico de exercicio",
+        "prancha de equilibrio", "elastico de exercicio", "natacao", "mergulho",
+        "oculos de natacao",
     ),
     "Camping, Pesca e Outdoor": (
         "barraca", "saco de dormir", "lanterna de cabeca", "canivete",
@@ -197,8 +200,9 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "lembrancinha", "painel de festa", "descartavel para festa",
     ),
     "Embalagens e Descartáveis": (
-        "saco plastico", "embalagem", "caixa de papelao", "plastico bolha",
-        "copo descartavel", "pote descartavel", "sacola",
+        "saco plastico", "sacola", "sacolas", "embalagem", "caixa de papelao",
+        "plastico bolha",
+        "copo descartavel", "pote descartavel",
     ),
 }
 
@@ -229,21 +233,60 @@ def _construir_indice() -> None:
             _INDICE.append((padrao, macro, peso_fixo or len(termo.split(" "))))
 
 
+# Quantas palavras do começo do nome contam. Título de anúncio brasileiro abre pelo
+# substantivo-cabeça e o resto é qualificador, acessório ou público-alvo. Ler o nome
+# inteiro fazia o qualificador vencer a cabeça, e a auditoria de 25 nomes reais em
+# 06/09/2026 mostrou 1 em cada 4 errados por isso:
+#
+#   "Lanterna Tática ... Ultra Potente Bateria"   -> bateria  -> Elétricos (é lanterna)
+#   "Óculos Natação ... Mergulho Piscina"         -> piscina  -> Jardim    (é esporte)
+#   "Kit 2 Colmeia Organizador Gaveta Calcinha"   -> calcinha -> Moda      (é organizador)
+#
+# Nos três, a palavra que decidiu está no fim. Errar assim é pior que não classificar:
+# põe o item na regra errada e devolve ao grupo exatamente a oferta fora do nicho.
+JANELA_CABECA = 4
+
+
+def _cabeca(alvo: str) -> tuple[str, int]:
+    """As primeiras palavras úteis, e até onde a cabeça vai.
+
+    Sem a quantidade que abre tanto anúncio: "50 Sacolas Plástica Premium" tem a
+    cabeça na segunda palavra, e contar o "50" gastaria um quarto da janela com
+    ruído.
+
+    Devolve uma string mais longa que a janela junto com o limite dela, porque um
+    termo de várias palavras que COMEÇA na cabeça continua valendo mesmo terminando
+    fora — "Compressor Portátil Digital Calibrador De Pneu" tem "calibrador de
+    pneu" começando na quarta palavra, e cortar no limite seco deixava só
+    "compressor" e mandava peça automotiva para Ferramentas.
+    """
+    palavras = [p for p in alvo.split(" ") if p and not p.isdigit()]
+    cabeca = " ".join(palavras[:JANELA_CABECA])
+    return " ".join(palavras[:JANELA_CABECA + 3]), len(cabeca)
+
+
 def macro_do_nome(nome: str) -> str:
     """Macro-categoria do nome, ou "" quando não dá para afirmar.
 
-    Pontua por especificidade: um termo de duas palavras vale mais que um de uma,
-    porque "fone de ouvido" identifica melhor que "fone". Empate no topo devolve
-    vazio — duas categorias igualmente plausíveis é ausência de resposta, não
-    escolha entre elas.
+    Só a cabeça do nome pontua (ver `JANELA_CABECA`). Dentro dela, pontua por
+    especificidade: um termo de duas palavras vale mais que um de uma, porque
+    "fone de ouvido" identifica melhor que "fone". Empate no topo devolve vazio —
+    duas categorias igualmente plausíveis é ausência de resposta, não escolha
+    entre elas.
     """
     _construir_indice()
     alvo = _dobrar(nome)
     if not alvo:
         return ""
+    trecho, limite = _cabeca(alvo)
+    if not trecho:
+        return ""
     pontos: dict[str, int] = {}
     for padrao, macro, peso in _INDICE:
-        if padrao.search(alvo):
+        achado = padrao.search(trecho)
+        # O termo tem de COMEÇAR dentro da cabeça. Terminar fora é permitido; nascer
+        # fora, não — é aí que mora o qualificador que classificava errado.
+        if achado and achado.start() < limite:
             pontos[macro] = pontos.get(macro, 0) + peso
     if not pontos:
         return ""
