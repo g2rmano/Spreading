@@ -72,6 +72,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "geladeira", "refrigerador", "fogao", "cooktop", "microondas",
         "lava louca", "lava roupas", "lavadora", "secadora", "freezer",
         "airfryer", "air fryer", "fritadeira", "liquidificador", "batedeira",
+        "lava e seca", "maquina de lavar", "extratora",
         ("aspirador", 3),
         "cafeteira", "sanduicheira", "forno eletrico", "purificador", "bebedouro", "ferro de passar",
     ),
@@ -84,12 +85,13 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "colchao", "travesseiro", "edredom", "lencol", "cortina", "tapete",
         "toalha", "almofada", "quadro decorativo", "espelho", "luminaria",
         "abajur", "criado mudo", "rack", "painel de tv", "cabideiro",
+        "aromatizador", "home spray",
     ),
     "Cozinha, Mesa e Bar": (
         "panela", "frigideira", "talher", "talheres", "prato", "copo", "taca",
         "caneca", "garrafa termica", "jogo de jantar", "faqueiro", "assadeira",
         "escorredor", "pote hermetico", "marmita", "churrasqueira", "espetinho",
-        "galheteiro", "saleiro", "bandeja",
+        "galheteiro", "saleiro", "bandeja", "garrafa isotermica",
     ),
     "Limpeza e Lavanderia": (
         "detergente", "sabao", "amaciante", "desinfetante", "agua sanitaria",
@@ -111,7 +113,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
     "Materiais Elétricos e Componentes": (
         "lampada", "reator", "disjuntor", "tomada", "interruptor", "fita led",
         "refletor", "extensao eletrica", "filtro de linha", "pilha", "bateria",
-        "soquete", "e27", "plafon",
+        "soquete", "e27", "plafon", "spot led", "rolo de fio", "cabo flexivel",
         "placa solar", "inversor", "fio eletrico",
     ),
     "Jardim, Piscina e Área Externa": (
@@ -145,26 +147,28 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "atadura", "colar cervical", "joelheira", "tornozeleira", "muleta",
         "cadeira de rodas", "escova de dente", "creme dental", "fio dental",
         "suplemento", "whey", "creatina", "colageno", "vitamina",
+        "magnesio", "pre treino", "cinta hernia", "multivitaminico", "omega 3",
     ),
     "Alimentos e Bebidas": (
         "cafe", "cha", "chocolate", "biscoito", "bolacha", "cerveja", "vinho",
         "whisky", "vodka", "refrigerante", "suco", "azeite", "arroz", "feijao",
         "macarrao", "farinha", "acucar", "leite", "achocolatado", "castanha",
         "amendoim", "macadamia", "noz", "mel", "tempero", "gelatina",
+        "molho", "curry",
     ),
     "Moda, Calçados e Acessórios": (
         "camiseta", "camisa", "calca", "bermuda", "short", "vestido", "saia",
         "jaqueta", "moletom", "blusa", "tenis", "sapato", "sandalia", "chinelo",
         "bota", "meia", "cueca", "calcinha", "sutia", "oculos de sol", "cinto",
-        "bone", "pijama",
+        "bone", "pijama", "cropped",
     ),
     "Bolsas, Malas e Viagem": (
         "mochila", "bolsa", "mala de viagem", "carteira", "necessaire",
-        "pochete", "mala de bordo",
+        "pochete", "mala de bordo", "chaveiro",
     ),
     "Joias, Relógios e Bijuterias": (
         "relogio", "colar", "pulseira", "brinco", "anel", "corrente de prata",
-        "bijuteria", "piercing",
+        "bijuteria", "piercing", "alianca", "aliancas", "gargantilha",
     ),
     "Esportes e Fitness": (
         "halter", "haltere", "anilha", "barra de supino", "esteira ergometrica",
