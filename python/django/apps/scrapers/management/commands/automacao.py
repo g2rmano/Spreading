@@ -234,6 +234,16 @@ def _rodar_cupons(lote=40):
     resultado["validacoes_checkout"] = run_validation_batch(
         adapters=CHECKOUT_VALIDATION_ADAPTERS, limit=2,
     )
+    # Produto criado pelo pipeline de cupom nasce com `categoria=DESCONHECIDO`, e o
+    # classificador de macro do ML deriva justamente da categoria. Sem macro, nenhuma
+    # `ConfiguracaoEnvio` enxerga o item — todas filtram por ela. Medido em 04/09:
+    # 249 dos 300 candidatos com cupom provado estavam assim, invisíveis. Aqui só o
+    # que já tem par confirmado e cupom ativo, que é o que muda o funil hoje.
+    from apps.scrapers.categorizar_por_nome import popular_macro_por_nome
+
+    resultado["macros_por_nome"] = popular_macro_por_nome(
+        limite=max(200, lote * 5), apenas_com_cupom=True,
+    )
     logger.info(
         "CUPONS: %s encontrado(s), %s persistido(s), %s preparado(s), "
         "%s link(s) verificado(s), %s cupom(ns) pronto(s), %s falha(s)",
