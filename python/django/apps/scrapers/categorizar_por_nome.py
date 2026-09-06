@@ -296,12 +296,24 @@ def macro_do_nome(nome: str) -> str:
     return ordenado[0][0]
 
 
-def popular_macro_por_nome(*, limite=None, apenas_com_cupom=False) -> int:
-    """Preenche `macro_categoria` vazia a partir do nome. Idempotente.
+#: `categoria` que o marketplace não soube dizer. Macro apoiada nela é palpite de
+#: alguém, não autoridade — ver `popular_macro_por_nome`.
+CATEGORIA_SEM_AUTORIDADE = ("", "DESCONHECIDO")
 
-    Só toca em linha com o campo vazio: `categoria` vinda do marketplace é
-    autoridade maior e `cateorize.popular_macro_categorias` continua sendo quem
-    manda onde ela existe.
+
+def popular_macro_por_nome(*, limite=None, apenas_com_cupom=False,
+                           corrigir_sem_categoria=True) -> int:
+    """Preenche `macro_categoria` a partir do nome. Idempotente.
+
+    Onde o marketplace informou `categoria`, ele manda:
+    `cateorize.popular_macro_categorias` deriva a macro dali e nada aqui a toca.
+
+    Onde `categoria` é `DESCONHECIDO`, porém, a macro gravada não tem autoridade
+    nenhuma — ela também saiu de um palpite. Encontrado em produção em 06/09/2026:
+    "Robô Aspirador Xiaomi S40 Lds 10.000pa Alexa Wi-fi" com `categoria` desconhecida
+    e macro "Celulares, Telefonia e Wearables", o que colocava um aspirador na regra
+    de celulares e mandava para o grupo exatamente a oferta fora do nicho. Nesse
+    caso, e só nele, um veredito confiante do nome corrige o palpite anterior.
 
     `apenas_com_cupom` restringe ao que realmente muda o funil hoje — produto com
     par confirmado e cupom ativo —, para o ciclo de 15 minutos não varrer o
@@ -311,9 +323,13 @@ def popular_macro_por_nome(*, limite=None, apenas_com_cupom=False) -> int:
 
     from apps.scrapers.models import Produto
 
-    qs = Produto.objects.filter(
-        Q(macro_categoria__isnull=True) | Q(macro_categoria="")
-    ).exclude(nome="")
+    vazio = Q(macro_categoria__isnull=True) | Q(macro_categoria="")
+    if corrigir_sem_categoria:
+        # Macro preenchida sobre categoria desconhecida também entra: pode estar
+        # errada, e o nome é a única evidência disponível para conferir.
+        vazio |= (Q(categoria__in=CATEGORIA_SEM_AUTORIDADE)
+                  | Q(categoria__isnull=True))
+    qs = Produto.objects.filter(vazio).exclude(nome="")
     if apenas_com_cupom:
         qs = qs.filter(
             cupons_normalizados__status="confirmado",
@@ -325,8 +341,15 @@ def popular_macro_por_nome(*, limite=None, apenas_com_cupom=False) -> int:
     lote, atualizados = [], 0
     for produto in qs.iterator(chunk_size=500) if not limite else list(qs):
         macro = macro_do_nome(produto.nome)
-        if not macro:
+        if not macro or macro == (produto.macro_categoria or ""):
             continue
+        # Só sobrescreve macro já preenchida quando a categoria não tem autoridade.
+        # Com categoria conhecida, o marketplace continua sendo a fonte da verdade
+        # mesmo que o nome sugira outra coisa.
+        if (produto.macro_categoria or "").strip():
+            categoria = (produto.categoria or "").strip().upper()
+            if categoria not in CATEGORIA_SEM_AUTORIDADE:
+                continue
         produto.macro_categoria = macro
         lote.append(produto)
         if len(lote) >= 500:

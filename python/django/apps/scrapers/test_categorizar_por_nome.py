@@ -122,6 +122,8 @@ class PopularMacroPorNomeTests(TestCase):
         ja_tem = self._produto("Cafeteira Expressa Automatica",
                                macro="Casa, Móveis e Decoração",
                                link="https://produto.mercadolivre.com.br/JATEM")
+        # Categoria do marketplace: é ela que dá autoridade à macro gravada.
+        Produto.objects.filter(pk=ja_tem.pk).update(categoria="MLB-COFFEE_MAKERS")
 
         self.assertEqual(popular_macro_por_nome(), 1)
 
@@ -130,6 +132,36 @@ class PopularMacroPorNomeTests(TestCase):
         self.assertEqual(vazio.macro_categoria, "Ferramentas e Manutenção")
         # Categoria vinda do marketplace e autoridade maior; nao se sobrescreve.
         self.assertEqual(ja_tem.macro_categoria, "Casa, Móveis e Decoração")
+
+    def test_corrige_macro_errada_quando_a_categoria_e_desconhecida(self):
+        """Macro sobre categoria DESCONHECIDO tambem foi palpite de alguem.
+
+        Encontrado em producao em 06/09/2026: "Robo Aspirador Xiaomi S40 Lds
+        10.000pa Alexa Wi-fi" com categoria desconhecida e macro "Celulares,
+        Telefonia e Wearables". Resultado: aspirador competindo na regra de
+        celulares e indo para o grupo como oferta fora do nicho.
+        """
+        errado = self._produto(
+            "Robô Aspirador Xiaomi S40 Lds 10.000pa Alexa Wi-fi",
+            macro="Celulares, Telefonia e Wearables",
+            link="https://produto.mercadolivre.com.br/ASPIRA")
+        Produto.objects.filter(pk=errado.pk).update(categoria="DESCONHECIDO")
+
+        self.assertEqual(popular_macro_por_nome(), 1)
+        errado.refresh_from_db()
+        self.assertEqual(errado.macro_categoria, "Eletrodomésticos")
+
+    def test_categoria_do_marketplace_continua_mandando(self):
+        """Com categoria conhecida, o marketplace ganha do nome."""
+        oficial = self._produto(
+            "Cafeteira Expressa Automatica Cor Preta",
+            macro="Casa, Móveis e Decoração",
+            link="https://produto.mercadolivre.com.br/OFICIAL")
+        Produto.objects.filter(pk=oficial.pk).update(categoria="MLB-HOME_APPLIANCES")
+
+        popular_macro_por_nome()
+        oficial.refresh_from_db()
+        self.assertEqual(oficial.macro_categoria, "Casa, Móveis e Decoração")
 
     def test_apenas_com_cupom_ignora_quem_nao_tem_par(self):
         com = self._produto("Panela De Pressao 4,5 Litros",
