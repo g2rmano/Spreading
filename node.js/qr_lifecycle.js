@@ -14,6 +14,10 @@ const limparQr = (session) => {
     if (!session) return false;
     const tinhaQr = Boolean(session.ultimoQR);
     session.ultimoQR = null;
+    // Sair da fase de QR zera o relogio de abandono. Sem isto, uma sessao que
+    // pareou e mais tarde volta a pedir QR herdaria a idade da tentativa antiga
+    // e seria destruida no primeiro tique do coletor.
+    session.qrDesde = null;
     return tinhaQr;
 };
 

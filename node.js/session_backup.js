@@ -76,14 +76,18 @@ const infoBackup = (authPath) => {
  * armazenamento, e uma cópia tirada nessa janela pode carregar a mesma metade que
  * queremos evitar.
  */
-const salvar = (authPath, motivo = '') => {
+const salvar = async (authPath, motivo = '') => {
     const c = caminhos(authPath);
     if (!existe(c.vivo)) return false;
     try {
         remover(c.tmp);
-        // `cp -r` do Node. Sem dereference: o perfil tem symlinks (SingletonLock e
-        // afins) que apontam para caminhos de runtime e não devem ser seguidos.
-        fs.cpSync(c.vivo, c.tmp, {
+        // `cp -r` do Node, na versão que NÃO bloqueia o event loop. `cpSync` copia
+        // o perfil inteiro do Chromium de forma síncrona; enquanto isso o processo
+        // não responde `/health`, e três sondas perdidas são o SIGKILL do watchdog
+        // — matar o worker no meio da cópia da credencial é o oposto do objetivo.
+        // Sem dereference: o perfil tem symlinks (SingletonLock e afins) que
+        // apontam para caminhos de runtime e não devem ser seguidos.
+        await fs.promises.cp(c.vivo, c.tmp, {
             recursive: true, dereference: false, force: true, errorOnExist: false,
             filter: (origem) => {
                 const nome = path.basename(origem);
@@ -118,14 +122,14 @@ const salvar = (authPath, motivo = '') => {
  * evidência de um defeito que ninguém entendeu é como se perde a próxima
  * investigação.
  */
-const restaurar = (authPath) => {
+const restaurar = async (authPath) => {
     const c = caminhos(authPath);
     if (!temBackup(authPath)) return false;
     try {
         const rejeitada = path.join(authPath, '.session-rejeitada');
         remover(rejeitada);
         if (existe(c.vivo)) fs.renameSync(c.vivo, rejeitada);
-        fs.cpSync(c.bak, c.vivo, {
+        await fs.promises.cp(c.bak, c.vivo, {
             recursive: true, dereference: false, force: true, errorOnExist: false,
         });
         return true;

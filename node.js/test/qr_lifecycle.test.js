@@ -67,6 +67,16 @@ test('limpar QR e idempotente', () => {
     assert.equal(limparQr(atual), false);
 });
 
+test('limpar QR zera o relogio de abandono', () => {
+    // `qrDesde` mede ha quanto tempo a sessao segura a vaga sem parear. Sair da
+    // fase de QR tem de zerar: uma sessao que pareia e mais tarde volta a pedir
+    // QR herdaria a idade da tentativa antiga e cairia no teto no primeiro tique.
+    const atual = sessao();
+    atual.qrDesde = Date.now() - 60 * 60 * 1000;
+    limparQr(atual);
+    assert.equal(atual.qrDesde, null);
+});
+
 test('somente rejeicoes conhecidas da reinjecao de LOGOUT disparam recuperacao', () => {
     assert.equal(rejeicaoRecuperavelDuranteLogout('auth timeout'), true);
     assert.equal(rejeicaoRecuperavelDuranteLogout(

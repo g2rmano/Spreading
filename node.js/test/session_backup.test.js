@@ -20,43 +20,43 @@ function perfil() {
 
 const creds = (dir) => path.join(dir, 'Default', 'IndexedDB', 'creds');
 
-test('sem copia nao ha o que restaurar', () => {
+test('sem copia nao ha o que restaurar', async () => {
     const { raiz } = perfil();
     assert.equal(backup.temBackup(raiz), false);
-    assert.equal(backup.restaurar(raiz), false);
+    assert.equal(await backup.restaurar(raiz), false);
 });
 
-test('salva, e a copia carrega a credencial', () => {
+test('salva, e a copia carrega a credencial', async () => {
     const { raiz } = perfil();
-    assert.equal(backup.salvar(raiz, 'teste'), true);
+    assert.equal(await backup.salvar(raiz, 'teste'), true);
     assert.equal(backup.temBackup(raiz), true);
     assert.equal(
         fs.readFileSync(creds(path.join(raiz, '.session-bak')), 'utf8'),
         'credencial-boa');
 });
 
-test('cache fica de fora: e o grosso do perfil e regenera sozinho', () => {
+test('cache fica de fora: e o grosso do perfil e regenera sozinho', async () => {
     const { raiz } = perfil();
-    backup.salvar(raiz);
+    await backup.salvar(raiz);
     assert.equal(
         fs.existsSync(path.join(raiz, '.session-bak', 'Default', 'Cache')), false);
 });
 
-test('restaura por cima de uma credencial corrompida', () => {
+test('restaura por cima de uma credencial corrompida', async () => {
     const { raiz, sessao } = perfil();
-    backup.salvar(raiz);
+    await backup.salvar(raiz);
     // O modo de falha real: o Chromium morre no meio do flush e o que sobra e
     // metade — LevelDB sem os blobs. Aqui, o arquivo truncado.
     fs.writeFileSync(creds(sessao), '');
-    assert.equal(backup.restaurar(raiz), true);
+    assert.equal(await backup.restaurar(raiz), true);
     assert.equal(fs.readFileSync(creds(sessao), 'utf8'), 'credencial-boa');
 });
 
-test('a credencial recusada e guardada, nao apagada', () => {
+test('a credencial recusada e guardada, nao apagada', async () => {
     const { raiz, sessao } = perfil();
-    backup.salvar(raiz);
+    await backup.salvar(raiz);
     fs.writeFileSync(creds(sessao), 'meia-credencial');
-    backup.restaurar(raiz);
+    await backup.restaurar(raiz);
     // Apagar a unica evidencia de um defeito que ninguem entendeu e como se perde
     // a proxima investigacao.
     assert.equal(
@@ -64,33 +64,33 @@ test('a credencial recusada e guardada, nao apagada', () => {
         'meia-credencial');
 });
 
-test('uma copia interrompida nunca vira a copia oficial', () => {
+test('uma copia interrompida nunca vira a copia oficial', async () => {
     const { raiz, sessao } = perfil();
-    backup.salvar(raiz, 'boa');
+    await backup.salvar(raiz, 'boa');
     // Segunda copia com a sessao viva ja destruida: tem de falhar sem destruir a
     // copia anterior, senao guardariamos exatamente o defeito.
     fs.rmSync(sessao, { recursive: true, force: true });
-    assert.equal(backup.salvar(raiz, 'tarde demais'), false);
+    assert.equal(await backup.salvar(raiz, 'tarde demais'), false);
     assert.equal(backup.temBackup(raiz), true);
     assert.equal(
         fs.readFileSync(creds(path.join(raiz, '.session-bak')), 'utf8'),
         'credencial-boa');
 });
 
-test('descartar apaga a copia e a marca', () => {
+test('descartar apaga a copia e a marca', async () => {
     const { raiz } = perfil();
-    backup.salvar(raiz);
+    await backup.salvar(raiz);
     assert.ok(backup.infoBackup(raiz).criado_em);
     backup.descartar(raiz);
     assert.equal(backup.temBackup(raiz), false);
     assert.equal(backup.infoBackup(raiz), null);
 });
 
-test('salvar duas vezes deixa a copia mais nova', () => {
+test('salvar duas vezes deixa a copia mais nova', async () => {
     const { raiz, sessao } = perfil();
-    backup.salvar(raiz, 'primeira');
+    await backup.salvar(raiz, 'primeira');
     fs.writeFileSync(creds(sessao), 'credencial-nova');
-    backup.salvar(raiz, 'segunda');
+    await backup.salvar(raiz, 'segunda');
     assert.equal(
         fs.readFileSync(creds(path.join(raiz, '.session-bak')), 'utf8'),
         'credencial-nova');

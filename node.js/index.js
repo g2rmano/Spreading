@@ -264,6 +264,14 @@ const SEND_RECONNECT_WAIT_MS = parseInt(process.env.WA_SEND_RECONNECT_WAIT_MS, 1
 // isso nao vale mais os 45s que existiam quando isto era um getChats completo.
 const GROUP_SYNC_TIMEOUT_MS = parseInt(process.env.GROUP_SYNC_TIMEOUT_MS, 10) || 15000;
 const QR_IDLE_DESTROY_MS = parseInt(process.env.QR_IDLE_DESTROY_MS, 10) || 180000;
+// Teto absoluto de posse da vaga por uma sessao que ninguem pareou, contado do
+// primeiro QR e imune a polling. QR_IDLE_DESTROY_MS sozinho nao segura: ele mede
+// `requestedAt`, que /api/status renova a cada poucos segundos — em 06/09/2026
+// uma sessao nunca pareada segurou a unica vaga por 34 minutos enquanto a sessao
+// que envia recebia "Capacidade maxima atingida" e o funil nao entregou nada.
+// 15min e folgado para quem esta com o celular na mao; nao para quem esqueceu a
+// aba aberta.
+const QR_MAX_HOLD_MS = parseInt(process.env.QR_MAX_HOLD_MS, 10) || 900000;
 // Espera antes de copiar a credencial recém-conectada: tempo para o Chromium
 // assentar o IndexedDB. Copiar cedo demais guarda um estado incompleto.
 const BACKUP_APOS_CONECTAR_MS = parseInt(process.env.WA_BACKUP_DELAY_MS, 10) || 45000;
@@ -593,6 +601,11 @@ const createSessionState = (instanceId, organizationId = '') => ({
     initialized: false,
     isConnected: false,
     ultimoQR: null,
+    // Quando esta sessao ENTROU na fase de QR. Distinto de `requestedAt`: aquele
+    // mede a ultima vez que alguem perguntou pela sessao, e por isso nao serve
+    // para decidir abandono — o painel aberto e o proprio loop do Django renovam
+    // `requestedAt` sem que ninguem tenha pareado nada.
+    qrDesde: null,
     gruposCache: [],
     gruposCarregados: false,
     gruposSincronizando: false,
@@ -805,8 +818,22 @@ const agendarKeepalive = (session, client) => {
             }
         } catch (err) {
             // Sondagem e diagnostico, nunca veredito: uma leitura perdida aqui
-            // nao pode derrubar uma sessao saudavel.
+            // nao pode derrubar uma sessao saudavel. Mas ELA CONTA. Antes este
+            // catch so logava, e o relogio do teto nunca comecava: uma pagina que
+            // faz a sonda ESTOURAR (timeout, frame destacado) e justamente a
+            // pagina morta, e a sessao seguia anunciando `conectado`. Quem decide
+            // continua sendo o teto, depois de falhas seguidas — nao esta leitura.
+            registrarStoreIndisponivel(session);
             console.warn(`[${session.id}] Keepalive nao sondou o store: ${err.message}`);
+            if (deveReciclarStoreIndisponivel(session)) {
+                console.error(
+                    `[${session.id}] Keepalive: sonda do store falhando alem do teto; reciclando.`
+                );
+                session.keepaliveEmVoo = false;
+                recycleSession(session, 'sonda do store falhando no keepalive')
+                    .catch(() => undefined);
+                return;
+            }
         }
         session.keepaliveEmVoo = false;
         if (session.client !== client) return;
@@ -908,11 +935,15 @@ const purgeAuthDir = (session, reason) => {
         console.error(`[${session.id}] Purge recusado: vínculo de sessão inconsistente.`);
         return false;
     }
-    // A cópia morre junto. Purga acontece quando a credencial acabou de verdade —
-    // aparelho desvinculado, logout pedido —, e nesse caso a cópia é do mesmo
-    // vínculo morto: repô-la só devolveria a mesma recusa.
-    sessionBackup.descartar(session.authPath);
-    return authStore.purgeAuthDir(authRootPath, session.authPath, reason);
+    // A cópia morre junto — mas SÓ depois de a purga dar certo. Descartar antes
+    // deixava o caso ruim sem saída: se o `rm -rf` falhasse (EBUSY, ENOSPC) a
+    // função devolvia false com a credencial velha ainda no lugar e a cópia boa
+    // já destruída. Purga acontece quando a credencial acabou de verdade —
+    // aparelho desvinculado, logout pedido —, e aí a cópia é do mesmo vínculo
+    // morto: repô-la só devolveria a mesma recusa.
+    const purgou = authStore.purgeAuthDir(authRootPath, session.authPath, reason);
+    if (purgou) sessionBackup.descartar(session.authPath);
+    return purgou;
 };
 const purgeAuthDirPorId = (instanceId, organizationId, reason) => {
     const authPath = authPathDe(instanceId);
@@ -921,8 +952,9 @@ const purgeAuthDirPorId = (instanceId, organizationId, reason) => {
         sessionManifest.quarantine(authPath, verified.status);
         return false;
     }
-    sessionBackup.descartar(authPath);
-    return authStore.purgeAuthDir(authRootPath, authPath, reason);
+    const purgou = authStore.purgeAuthDir(authRootPath, authPath, reason);
+    if (purgou) sessionBackup.descartar(authPath);
+    return purgou;
 };
 const markPaired = (session) => authStore.markPaired(authRootPath, session.authPath);
 const clearPaired = (session) => authStore.clearPaired(authRootPath, session.authPath);
@@ -1033,10 +1065,19 @@ const scheduleQrIdleDestroy = (session) => {
     if (session.qrIdleTimer) return;
     session.qrIdleTimer = setTimeout(async () => {
         const idleMs = Date.now() - (session.requestedAt || 0);
+        const idadeQr = session.qrDesde ? Date.now() - session.qrDesde : 0;
+        const ninguemOlhando = idleMs >= QR_IDLE_DESTROY_MS;
+        const passouDoTeto = idadeQr >= QR_MAX_HOLD_MS;
         // qrAtivo, nao `ultimoQR` cru: um QR ja consumido (ou de uma fase que
         // avancou) nao e motivo para destruir o runtime de uma sessao viva.
-        if (!session.isConnected && qrAtivo(session) && idleMs >= QR_IDLE_DESTROY_MS) {
-            await destroySessionRuntime(session, 'QR ocioso de sessao restaurada', true);
+        if (!session.isConnected && qrAtivo(session) && (ninguemOlhando || passouDoTeto)) {
+            await destroySessionRuntime(
+                session,
+                passouDoTeto
+                    ? `QR sem pareamento ha ${Math.round(idadeQr / 60000)}min`
+                    : 'QR ocioso de sessao restaurada',
+                true,
+            );
         } else {
             session.qrIdleTimer = null;
             scheduleQrIdleDestroy(session);
@@ -1220,9 +1261,11 @@ const concluirPreparacao = (session, client) => {
     // IndexedDB assentar antes de a cópia ser lida — ver session_backup.js.
     setTimeout(() => {
         if (session.client !== client || !session.isConnected) return;
-        if (sessionBackup.salvar(session.authPath, 'conectado')) {
-            console.log(`[${session.id}] Credencial copiada para restauro futuro.`);
-        }
+        sessionBackup.salvar(session.authPath, 'conectado').then((copiou) => {
+            if (copiou) console.log(`[${session.id}] Credencial copiada para restauro futuro.`);
+        }).catch((err) => {
+            console.warn(`[${session.id}] Falha ao copiar a credencial:`, err.message);
+        });
     }, BACKUP_APOS_CONECTAR_MS).unref();
 
     // A versao e apenas telemetria. A chamada pode travar durante um rollout do
@@ -1458,7 +1501,13 @@ const reviveSession = (session) => {
     return session;
 };
 
-const recycleSession = async (session, reason, purgeAuth = false, msgOverride = null) => {
+// `antesDeReconectar` roda com o Chromium JA morto e antes de qualquer religada.
+// E o unico ponto seguro para mexer no perfil em disco: enquanto o navegador
+// vive ele mantem descritores abertos e pode recriar arquivos no caminho que
+// acabamos de trocar.
+const recycleSession = async (
+    session, reason, purgeAuth = false, msgOverride = null, antesDeReconectar = null,
+) => {
     const client = session.client;
     if (!client) return;
     session.lastRecoveryReason = reason;
@@ -1485,6 +1534,13 @@ const recycleSession = async (session, reason, purgeAuth = false, msgOverride = 
     session.initTimer = null;
     liberarPortaoBootstrap(session);
     await encerrarClienteChromium(session, client, reason);
+    if (typeof antesDeReconectar === 'function') {
+        try {
+            await antesDeReconectar();
+        } catch (err) {
+            console.error(`[${session.id}] Falha antes de reconectar:`, err.message);
+        }
+    }
     if (session.qrBootstrapAtivo) {
         await scheduleQrBootstrapRetry(session, reason);
         return;
@@ -1744,6 +1800,9 @@ const initializeSession = (session) => {
         liberarPortaoBootstrap(session);
         limparLogoutRecovery(session);
         session.ultimoQR = qr;
+        // O WhatsApp reemite o QR a cada ~20s. So o PRIMEIRO da sequencia marca
+        // o inicio da espera; senao a idade nunca cresce e o teto nunca chega.
+        if (!session.qrDesde) session.qrDesde = Date.now();
         session.fase = 'qr';
         session.progresso = 0;
         session.faseMsg = 'Aguardando leitura do QR Code…';
@@ -1758,23 +1817,36 @@ const initializeSession = (session) => {
         //
         // UMA vez por boot. Se o aparelho foi desvinculado de verdade, repor a
         // cópia dá na mesma recusa, e sem teto isso vira laço de restore/QR.
+        //
+        // A repositura acontece DEPOIS que o Chromium morre, nunca antes. Enquanto
+        // o navegador vive ele segura descritores do perfil e pode recriar arquivos
+        // no caminho recem-trocado — a copía boa era reposta por baixo de um
+        // processo ainda escrevendo, que é a mesma corrupção que ela existe para
+        // consertar. Por isso o restore vai no gancho pós-teardown do recycle.
         if (!session.backupTentado && hasStoredAuth(session.id)
                 && sessionBackup.temBackup(session.authPath)) {
             session.backupTentado = true;
             const info = sessionBackup.infoBackup(session.authPath);
-            if (sessionBackup.restaurar(session.authPath)) {
-                registrarLifecycle(session, 'backup_restaurado', {
-                    copia_de: info && info.criado_em,
-                });
-                console.warn(
-                    `[${session.id}] Credencial recusada; cópia de `
-                    + `${(info && info.criado_em) || 'data desconhecida'} reposta. Reiniciando.`);
-                recycleSession(session, 'credencial reposta do backup', false,
-                               'Recuperando a sessão salva…').catch((err) => {
-                    console.error(`[${session.id}] Falha ao reiniciar com a cópia:`, err.message);
-                });
-                return;
-            }
+            console.warn(
+                `[${session.id}] Credencial recusada; repondo cópia de `
+                + `${(info && info.criado_em) || 'data desconhecida'} após fechar o Chromium.`);
+            recycleSession(
+                session, 'credencial reposta do backup', false,
+                'Recuperando a sessão salva…',
+                async () => {
+                    if (await sessionBackup.restaurar(session.authPath)) {
+                        registrarLifecycle(session, 'backup_restaurado', {
+                            copia_de: info && info.criado_em,
+                        });
+                    } else {
+                        console.error(
+                            `[${session.id}] Cópia não pôde ser reposta; seguirá pedindo QR.`);
+                    }
+                },
+            ).catch((err) => {
+                console.error(`[${session.id}] Falha ao reiniciar com a cópia:`, err.message);
+            });
+            return;
         }
         scheduleQrIdleDestroy(session);
         // QR é uma credencial temporária. Ele existe somente no payload privado
@@ -2049,6 +2121,26 @@ const initializeSession = (session) => {
 
 const sessoesOcupandoSlot = () => Array.from(sessions.values()).filter(ocupaSlot).length;
 
+// Prioridade de vaga: credencial pareada ganha de QR sem pareamento.
+//
+// Devolve o id desalojado, ou null se nao havia candidata. A destruicao e
+// assincrona de proposito — `ensureSession` e sincrona e nao pode esperar o
+// Chromium morrer; quem pediu recebe `capacidade` desta vez e entra no proximo
+// poll, que e o mesmo caminho que a UI ja faz a cada poucos segundos.
+const desalojarQrSemCredencial = (requerente) => {
+    if (!hasStoredAuth(requerente)) return null; // sem credencial, sem prioridade
+    const candidata = Array.from(sessions.values()).find(
+        (s) => ocupaSlot(s) && !s.isConnected && qrAtivo(s) && !hasStoredAuth(s.id),
+    );
+    if (!candidata) return null;
+    destroySessionRuntime(
+        candidata, `vaga cedida para a sessao pareada ${requerente}`, true,
+    ).catch((err) => {
+        console.error(`[${candidata.id}] Falha ao ceder a vaga:`, err.message);
+    });
+    return candidata.id;
+};
+
 // Sessões criadas sem organização (restauro sob demanda antigo, rota de grupos
 // sem repassar a capability) nunca passam no verifyManifest do purge: o reset
 // cai em falha_reset ("Não foi possível descartar a sessão antiga") num loop
@@ -2084,7 +2176,15 @@ const ensureSession = (instanceId, organizationId = '') => {
     }
     if (!sessions.has(normalizedId)) {
         if (sessoesOcupandoSlot() >= MAX_WHATSAPP_SESSIONS) {
-            console.warn(`[${normalizedId}] Capacidade maxima atingida: ${MAX_WHATSAPP_SESSIONS} sessoes.`);
+            // Antes de recusar, cobra a vaga de quem nao tem direito a ela. Uma
+            // sessao parada em QR nao tem credencial nenhuma a perder; uma com
+            // credencial no volume e a que entrega mensagem. FIFO puro deixava a
+            // primeira barrar a segunda indefinidamente.
+            const desalojada = desalojarQrSemCredencial(normalizedId);
+            console.warn(
+                `[${normalizedId}] Capacidade maxima atingida: ${MAX_WHATSAPP_SESSIONS} sessoes.`
+                + (desalojada ? ` Vaga cobrada de [${desalojada}]; tente de novo em instantes.` : '')
+            );
             return createCapacitySessionState(normalizedId, organization);
         }
         const manifest = sessionManifest.readManifest(authPathDe(normalizedId));
@@ -2603,7 +2703,7 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
 // própria com um Chromium teimoso registrado no log do que ser morto no meio do flush.
 const PRAZO_SHUTDOWN_MS = 45000;
 let encerrando = false;
-const shutdown = async (signal) => {
+const shutdown = async (signal, codigoDeSaida = 0) => {
     if (encerrando) return;
     encerrando = true;
     const inicio = Date.now();
@@ -2624,13 +2724,22 @@ const shutdown = async (signal) => {
             `⚠️ Encerramento excedeu ${PRAZO_SHUTDOWN_MS}ms (${err.message}); saindo. `
             + 'A credencial pode ter ficado incompleta — conferir no próximo restore.');
     }
-    process.exit(0);
+    process.exit(codigoDeSaida);
 };
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('uncaughtException', (error) => {
     console.error('Excecao nao tratada:', error);
-    process.exit(1);
+    // Sair direto daqui pulava todo o `shutdown`: o Chromium ficava orfao e o
+    // IndexedDB — onde o whatsapp-web.js guarda a credencial — nao era liberado.
+    // Era a mesma credencial pela metade que o restore seguinte recusa, mandando
+    // uma pessoa escanear QR de novo sem que ninguem tenha desvinculado nada.
+    // O `shutdown` ja tem prazo proprio (PRAZO_SHUTDOWN_MS) bem abaixo do
+    // kill_timeout, entao isto nao pendura a saida.
+    shutdown('uncaughtException', 1).catch((err) => {
+        console.error('Falha ao encerrar apos excecao nao tratada:', err && err.message);
+        process.exit(1);
+    });
 });
 process.on('unhandledRejection', (reason) => {
     const emLogout = Array.from(sessions.values()).filter((session) => (
@@ -3249,9 +3358,28 @@ const rearmarQrBootstrap = (instanceId, organizationId = '') => {
 };
 
 const PORT = process.env.PORT || 3000;
+// O ledger grava um JSON por operacao de envio no volume. `prune` existia,
+// exportado e nunca chamado: WA_SEND_LEDGER_RETENTION_HOURS era uma retencao
+// declarada que ninguem aplicava, e o diretorio so crescia num volume pequeno.
+const LEDGER_PRUNE_INTERVAL_MS = parseInt(
+    process.env.WA_SEND_LEDGER_PRUNE_INTERVAL_MS, 10,
+) || 3600000;
+const agendarPrunePeriodico = () => {
+    const timer = setInterval(() => {
+        try {
+            const removidos = sendLedger.prune();
+            if (removidos) console.log(`[ledger] ${removidos} registro(s) vencido(s) removido(s).`);
+        } catch (err) {
+            console.warn('[ledger] Falha ao podar registros vencidos:', err.message);
+        }
+    }, LEDGER_PRUNE_INTERVAL_MS);
+    timer.unref();
+};
+
 app.listen(PORT, '::', () => {
     console.log(`Servidor rodando na porta ${PORT}`);
     // Depois do listen: /health tem de responder dentro do grace_period do Fly
     // sem esperar Chromium nenhum.
     restaurarSessoesDoVolume();
+    agendarPrunePeriodico();
 });
