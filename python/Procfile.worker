@@ -6,3 +6,4 @@ scrapeflash: sleep 60 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.p
 links: sleep 75 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo links --tick 5 --lote 40
 scrape: sleep 90 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo scrape --scrape-horas 3
 canais: sleep 120 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py monitorar_canais --tick 60
+saude: exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py worker_health --port 8081

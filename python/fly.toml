@@ -71,6 +71,27 @@ kill_timeout = "30s"
     path = "/healthz"
     headers = { Host = "spreading-web.fly.dev", X-Forwarded-Proto = "https" }
 
+# O check acima cobre SÓ o process group `web`. Sem o bloco abaixo, as oito
+# esteiras do `worker` podiam estar todas paradas e `fly status` seguia verde,
+# porque o app inteiro era julgado pelo gunicorn da outra máquina — e
+# `deploy/fly-nightly-power.sh` herda o mesmo engano ao aprovar o religamento.
+# O processo `saude` do Procfile.worker publica o heartbeat que as esteiras já
+# gravam; aqui só o consultamos.
+#
+# grace_period de 240s: o Procfile escalona os arranques até 120s (`canais`) e a
+# esteira mais tardia (`scrape`, sleep 90) só grava o primeiro heartbeat depois
+# disso. Um período curto reprovaria todo boot legítimo.
+[checks]
+  [checks.esteiras]
+    type = "http"
+    port = 8081
+    method = "get"
+    path = "/"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "240s"
+    processes = ["worker"]
+
 # ATENÇÃO — este bloco é o que a máquina REALMENTE roda. Não suba sem decidir o custo.
 #
 # Desde o desmembramento, esta VM roda somente gunicorn (1 processo, 8 threads) e, sob
