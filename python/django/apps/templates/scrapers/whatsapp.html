@@ -235,6 +235,10 @@
             <i data-lucide="unplug"></i> Desconectar WhatsApp
           </button>
         </div>
+        <div id="logout-confirm" class="sessao-acoes" style="display:none;">
+          <button id="wa-desconectar-sim" class="btn btn-danger btn-sm">Desconectar</button>
+          <button id="wa-desconectar-nao" class="btn btn-ghost btn-sm">Voltar</button>
+        </div>
         {# Toda ação precisa dizer no que deu: sem isto, uma falha fica idêntica a um sucesso. #}
         <div id="logout-msg" class="acao-msg"></div>
         <p class="help">Desconectar desvincula este número e pede um QR novo. As regras de Telegram não são afetadas.</p>
@@ -245,6 +249,17 @@
         <button id="wa-cancelar" class="btn btn-ghost btn-sm">
           <i data-lucide="rotate-ccw"></i> Cancelar e ler o QR de novo
         </button>
+        {% comment %}
+        Confirmação em página, não `confirm()` do navegador. O diálogo nativo abre
+        com o domínio no título ("spreading-web.fly.dev diz"), não aceita estilo, e
+        — o que importa aqui — CONGELA o loop de eventos: com ele aberto o poll não
+        roda, então a tela por trás fica exatamente como estava, inclusive sem QR.
+        Quem confirmava via a mesma tela parada e concluía que o botão não fez nada.
+        {% endcomment %}
+        <div id="cancelar-confirm" class="sessao-acoes" style="display:none;">
+          <button id="wa-cancelar-sim" class="btn btn-danger btn-sm">Descartar sessão</button>
+          <button id="wa-cancelar-nao" class="btn btn-ghost btn-sm">Voltar</button>
+        </div>
         <div id="cancelar-msg" class="acao-msg"></div>
         <p class="help">Descarta a sessão atual e recomeça do zero, com um QR code novo.</p>
       </div>
@@ -308,7 +323,13 @@
     // por que não volta sozinho.
     expirado:      { txt:'Sessão expirada — leia o QR', cls:'is-off', qr:true,  bar:false, step:'qr', err:true },
     inativo:       { txt:'Desconectado',               cls:'is-off', qr:true,  bar:false, step:'qr', err:true },
-    capacidade:    { txt:'Limite de conexões atingido',  cls:'is-off', qr:false, bar:false, step:'qr', err:true },
+    // Espera, não beco. `capacidade` é quase sempre a corrida de teardown: a sessão
+    // anterior ainda ocupa o slot único enquanto se desmonta, e o pedido seguinte é
+    // recusado por alguns segundos. Pintada como erro terminal (bar:false, qr:false),
+    // a tela ficava sem QR, sem barra e sem nada acontecendo — foi o que o usuário
+    // viu em 06/09/2026 e descreveu, com razão, como travada. Com barra e revive, ela
+    // se resolve sozinha quando o slot libera.
+    capacidade:    { txt:'Aguardando uma conexão livre…', cls:'is-mid', qr:false, bar:true, step:'qr' },
     falha_auth:    { txt:'Falha de autenticação',      cls:'is-off', qr:true,  bar:false, step:'qr', err:true },
     desconectado:  { txt:'Desconectado',               cls:'is-off', qr:true,  bar:false, step:'qr', err:true },
     // Terminal com credencial preservada: o revive abaixo resolve sem QR novo.
@@ -323,7 +344,8 @@
   // O GET da tela não revive mais a sessão (efeito colateral que divergia da
   // Saúde). Abrir a tela continua sendo a intenção explícita de conectar: ao ver
   // uma fase terminal, dispara UM revive via POST e deixa o poll acompanhar.
-  const FASES_REVIVIVEIS = ['inativo', 'expirado', 'desconectado', 'falha_auth', 'recuperacao_pausada'];
+  const FASES_REVIVIVEIS = ['inativo', 'expirado', 'desconectado', 'falha_auth',
+                            'recuperacao_pausada', 'capacidade'];
   // UM revive por EPISÓDIO terminal, não por page-load. O worker destrói o runtime
   // depois de 3 min de QR ocioso (QR_IDLE_DESTROY_MS) e a tela volta para 'inativo';
   // com um único revive por carregamento, esse já tinha sido gasto ao abrir a página
@@ -603,12 +625,34 @@
     setTimeout(poll, 1500);
   };
 
-  document.getElementById('wa-cancelar').onclick = async function () {
-    if (!confirm('Cancelar a reconexão e começar do zero? A sessão atual é descartada e você precisará ler o QR code de novo.')) return;
+  // Confirmação em dois passos, no lugar do `confirm()` do navegador. Além de
+  // parecer o que é — um alerta do domínio, sem estilo —, o diálogo nativo trava o
+  // loop de eventos: enquanto está aberto o poll não roda e a tela por trás congela
+  // sem QR, então quem confirmava via a mesma tela parada e achava que nada tinha
+  // acontecido. Aqui o botão vira a própria pergunta e o poll segue vivo atrás.
+  function armarConfirmacao(botao, caixa, sim, nao, executar) {
+    const mostrar = (confirmando) => {
+      botao.style.display = confirmando ? 'none' : '';
+      caixa.style.display = confirmando ? 'flex' : 'none';
+    };
+    botao.onclick = () => { mostrar(true); sim.focus(); };
+    nao.onclick = () => mostrar(false);
+    sim.onclick = async () => { mostrar(false); await executar(); };
+    // Esc volta atrás, como qualquer diálogo que se preze.
+    caixa.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { mostrar(false); botao.focus(); }
+    });
+  }
+
+  armarConfirmacao(
+    document.getElementById('wa-cancelar'),
+    document.getElementById('cancelar-confirm'),
+    document.getElementById('wa-cancelar-sim'),
+    document.getElementById('wa-cancelar-nao'),
+    async function () {
     const msg = cancelMsg;
     suprimirReviveAteQr = true;
     reviveTentado = true;
-    this.disabled = true;
     msg.style.color = 'var(--muted)';
     msg.textContent = 'Cancelando e preparando um QR novo…';
     try {
@@ -626,14 +670,16 @@
       msg.style.color = 'var(--red)';
       msg.textContent = 'Não foi possível falar com o servidor.';
     }
-    this.disabled = false;
     poll();
-  };
+  });
 
-  document.getElementById('wa-desconectar').onclick = async function () {
-    if (!confirm('Desconectar o WhatsApp? Você precisará ler o QR code novamente para reconectar.')) return;
+  armarConfirmacao(
+    document.getElementById('wa-desconectar'),
+    document.getElementById('logout-confirm'),
+    document.getElementById('wa-desconectar-sim'),
+    document.getElementById('wa-desconectar-nao'),
+    async function () {
     const msg = document.getElementById('logout-msg');
-    this.disabled = true;
     msg.style.color = 'var(--muted)';
     msg.textContent = 'Desconectando…';
     try {
@@ -651,9 +697,8 @@
       msg.style.color = 'var(--red)';
       msg.textContent = 'Não foi possível falar com o servidor.';
     }
-    this.disabled = false;
     poll();
-  };
+  });
 
   cicloPoll();
   // 5s, não 2,5s: o status é servido de um cache de 5s no backend, então polling mais
