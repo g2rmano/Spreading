@@ -135,25 +135,38 @@ def _avisar_sessao_travada(corpo: dict) -> None:
     """
     try:
         travadas = int(corpo.get("sessions_stuck") or 0)
+        # Sessão que JÁ foi pareada e voltou ao QR conta igual. Ela não está em fase
+        # terminal — está "esperando alguém escanear" —, e é exatamente por isso que
+        # passou despercebida em 06/09/2026: pareada em 04/09 12:31, de volta ao QR
+        # sem nenhum evento de logout, tratada pelo sistema como instalação nova.
+        # Instalação nova pode esperar; sessão que caiu, não.
+        repareamento = int(corpo.get("sessions_repareamento") or 0)
     except (TypeError, ValueError):
         return
-    if travadas <= 0:
+    total = travadas + repareamento
+    if total <= 0:
         cache.delete(_TRAVADA_KEY)
         return
     if cache.get(_TRAVADA_KEY):
         return
     cache.set(_TRAVADA_KEY, True, timeout=_TRAVADA_SILENCIO_S)
-    logger.error(
-        "wa_supervisor: %s sessão(ões) WhatsApp em estado terminal; precisa de reconexão manual.",
-        travadas,
-    )
+    if repareamento and not travadas:
+        motivo = (f"{repareamento} sessão(ões) WhatsApp caíram e estão pedindo QR de "
+                  f"novo. O worker responde, mas não envia até alguém reconectar.")
+    elif travadas and not repareamento:
+        motivo = (f"{travadas} sessão(ões) WhatsApp em estado terminal "
+                  f"(expirado/falha_auth/recuperacao_pausada). O worker responde, "
+                  f"mas não envia: precisa reconectar.")
+    else:
+        motivo = (f"{travadas} sessão(ões) WhatsApp em estado terminal e "
+                  f"{repareamento} pedindo QR de novo. Nenhuma delas envia.")
+    logger.error("wa_supervisor: %s", motivo)
     log_event(
-        "whatsapp", "sessao_travada",
-        f"{travadas} sessão(ões) WhatsApp em estado terminal (expirado/falha_auth/"
-        f"recuperacao_pausada). O worker responde, mas não envia: precisa reconectar.",
+        "whatsapp", "sessao_travada", motivo,
         level="error",
         contexto={
             "sessions_stuck": travadas,
+            "sessions_repareamento": repareamento,
             "sessions_ready": corpo.get("sessions_ready"),
             "sessions_total": corpo.get("sessions_total"),
         },

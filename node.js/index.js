@@ -2536,17 +2536,46 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
     return resultado;
 };
 
-// Fechamento gracioso: o Fly envia SIGTERM a cada deploy. Fechar o Chromium
-// corretamente evita locks corrompidos que fariam a sessão "sumir".
+// Fechamento gracioso: o Fly envia SIGTERM a cada deploy E a cada parada noturna.
+// Fechar o Chromium corretamente evita locks corrompidos que fariam a sessão "sumir".
+//
+// Isto aqui chamava `client.destroy()` cru, e o comentário de `encerrarClienteChromium`
+// explica exatamente por que isso não basta: o destroy pode RESOLVER sem o Chromium ter
+// morrido, e pode não resolver nunca. Sem timeout, o `Promise.allSettled` não terminava,
+// o `process.exit(0)` não rodava, e aos 90s de `kill_timeout` a Fly mandava SIGKILL no
+// meio da escrita do IndexedDB — que é onde o whatsapp-web.js guarda a credencial.
+//
+// O sintoma disso é o que se viu em 06/09/2026: sessão pareada em 04/09 12:31, nenhum
+// evento de logout no histórico, e mesmo assim o restore seguinte respondeu "Sessão não
+// encontrada ou expirada" e voltou para o QR. Ninguém desvinculou nada — a credencial
+// foi gravada pela metade.
+//
+// Agora usa o caminho endurecido, que confirma a morte pelo processo e mata órfão à
+// força, e tem prazo próprio bem abaixo do `kill_timeout`: é melhor sair por conta
+// própria com um Chromium teimoso registrado no log do que ser morto no meio do flush.
+const PRAZO_SHUTDOWN_MS = 45000;
 let encerrando = false;
 const shutdown = async (signal) => {
     if (encerrando) return;
     encerrando = true;
+    const inicio = Date.now();
     console.log(`🛑 ${signal} recebido — encerrando sessões…`);
     if (watchdog && !watchdog.killed) watchdog.kill();
-    await Promise.allSettled(
-        Array.from(sessions.values()).map((s) => (s.client ? s.client.destroy() : null))
-    );
+    const abertas = Array.from(sessions.values()).filter((s) => s.client);
+    try {
+        await withTimeout(
+            Promise.allSettled(abertas.map(
+                (s) => encerrarClienteChromium(s, s.client, `shutdown:${signal}`))),
+            PRAZO_SHUTDOWN_MS, 'shutdown',
+        );
+        console.log(
+            `✅ ${abertas.length} sessão(ões) encerrada(s) em ${Date.now() - inicio}ms.`);
+    } catch (err) {
+        // Sair mesmo assim. Ficar preso aqui garante o SIGKILL, que é o desfecho pior.
+        console.error(
+            `⚠️ Encerramento excedeu ${PRAZO_SHUTDOWN_MS}ms (${err.message}); saindo. `
+            + 'A credencial pode ter ficado incompleta — conferir no próximo restore.');
+    }
     process.exit(0);
 };
 process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -2616,6 +2645,13 @@ app.get('/health', (req, res) => {
         sessions_stuck: todas.filter((s) => (
             FASES_TERMINAIS.has(s.fase) || s.fase === 'inconsistente'
         )).length,
+        // Sessão que JÁ foi pareada e voltou a pedir QR. Não é fase terminal, então
+        // não entrava em `sessions_stuck`, e por isso ninguém era avisado — foi o
+        // buraco de 06/09/2026: pareada em 04/09 12:31, de volta ao QR sem um único
+        // evento de logout, e o sistema tratou como instalação nova esperando o
+        // primeiro scan. Instalação nova espera; sessão que caiu precisa de gente.
+        sessions_repareamento: todas.filter(
+            (s) => s.fase === 'qr' && hasStoredAuth(s.id)).length,
     });
 });
 

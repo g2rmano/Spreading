@@ -214,6 +214,33 @@ class SessaoTravadaTests(SimpleTestCase):
         self.assertEqual(evento.call_args[1]["level"], "error")
         self.assertEqual(evento.call_args[1]["contexto"]["sessions_stuck"], 1)
 
+    def test_sessao_que_caiu_e_voltou_ao_qr_tambem_avisa(self):
+        """Nao e fase terminal, e por isso passou despercebida.
+
+        06/09/2026: pareada em 04/09 12:31, de volta ao QR sem um unico evento de
+        logout no historico. O sistema leu como instalacao nova esperando o
+        primeiro scan e nao avisou ninguem. Instalacao nova pode esperar; sessao
+        que caiu, nao.
+        """
+        resultado, evento, reiniciar = self._verificar_com_corpo(
+            {"sessions_total": 1, "sessions_ready": 0, "sessions_stuck": 0,
+             "sessions_repareamento": 1}
+        )
+        self.assertEqual(resultado, "ok")
+        reiniciar.assert_not_called()
+        self.assertEqual(evento.call_args[0][1], "sessao_travada")
+        self.assertEqual(evento.call_args[1]["level"], "error")
+        self.assertEqual(evento.call_args[1]["contexto"]["sessions_repareamento"], 1)
+        self.assertIn("pedindo QR", evento.call_args[0][2])
+
+    def test_qr_de_instalacao_nova_nao_avisa(self):
+        """Sem `.paired`, o Node nao conta como repareamento — e nada dispara."""
+        _, evento, _ = self._verificar_com_corpo(
+            {"sessions_total": 1, "sessions_ready": 0, "sessions_stuck": 0,
+             "sessions_repareamento": 0}
+        )
+        evento.assert_not_called()
+
     def test_sessao_saudavel_nao_avisa_nada(self):
         _, evento, _ = self._verificar_com_corpo(
             {"sessions_total": 1, "sessions_ready": 1, "sessions_stuck": 0}
