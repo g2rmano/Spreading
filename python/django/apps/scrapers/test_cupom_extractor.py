@@ -339,9 +339,13 @@ class ExtracaoTests(TestCase):
             '"minimo":399,"teto":0,"escopo":""},'
             '{"codigo":"CORTADO","loja":"mercadoliv'
         )
+        # NÃO mockar `_json_resposta`. Ele termina em `json.loads` e nunca devolve
+        # None; um mock com `return_value=None` fazia este teste passar sobre um
+        # caminho que produção não tem, e escondeu por completo o fato de o resgate
+        # estar inalcançável atrás de `if dados is None`. Aqui o parser real recebe
+        # o texto truncado e levanta, que é o que acontece de verdade.
         with patch("apps.scrapers.llm._cliente"), \
-                patch("apps.scrapers.llm._texto_resposta", return_value=truncada), \
-                patch("apps.scrapers.llm._json_resposta", return_value=None):
+                patch("apps.scrapers.llm._texto_resposta", return_value=truncada):
             achados = extrair(MENSAGEM_AMBIGUA)
         self.assertEqual([c["codigo"] for c in achados],
                          ["TODOOSITE1308", "CASA1508"])

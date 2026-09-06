@@ -496,13 +496,27 @@ def extrair(texto: str, *, loja_padrao="", timeout=20) -> list[dict]:
                        "content": _PROMPT.format(mensagem=texto[:2500])}],
         )
         texto_resposta = _texto_resposta(resposta)
-        dados = _json_resposta(texto_resposta)
-        if dados is None:
-            # Resposta truncada ou ilegível. Recupera os cupons COMPLETOS que já
-            # vieram antes do corte em vez de perder a mensagem inteira: numa lista
-            # de sete, salvar seis é melhor que salvar zero, e cada objeto fechado
-            # é um cupom inteiro — não há meio-cupom válido.
+        try:
+            dados = _json_resposta(texto_resposta)
+        except ValueError:
+            # `_json_resposta` termina em `json.loads`: numa resposta truncada ela
+            # LEVANTA, nunca devolve None. O resgate vivia atrás de `if dados is
+            # None` e por isso jamais rodou em produção — o `JSONDecodeError` caía
+            # no `except Exception` de fora, era classificado como falha temporária
+            # e ainda abria o circuito por 30s. Ou seja: a chamada era paga, a
+            # mensagem inteira era descartada e a extração parava para todo o ciclo.
+            # O teste passava porque mockava `return_value=None`, um retorno que o
+            # helper não pode produzir.
+            #
+            # Recupera os cupons COMPLETOS que vieram antes do corte: numa lista de
+            # sete, salvar seis é melhor que salvar zero, e cada objeto fechado é um
+            # cupom inteiro — não há meio-cupom válido.
             dados = _resgatar_parcial(texto_resposta)
+            if not dados:
+                logger.warning(
+                    "Resposta da IA ilegível e sem cupom completo para resgatar; "
+                    "seguindo com o parser local."
+                )
         cupons = _limpar(dados, loja_detectada)
     except Exception as exc:
         motivo, ttl = _circuito_por_erro(exc)
