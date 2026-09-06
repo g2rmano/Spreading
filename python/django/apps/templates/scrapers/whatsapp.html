@@ -455,6 +455,15 @@
       } else if (fase === 'falha_reset') {
         cancelMsg.style.color = 'var(--red)';
         cancelMsg.textContent = s.mensagem || 'Não foi possível gerar o QR. Clique para tentar novamente.';
+      } else {
+        // Faltava o `else`, e é ele que produziu a tela travada de 06/09/2026: o
+        // erro de capacidade de um /iniciar/ anterior seguia escrito em vermelho
+        // enquanto a fase já tinha voltado para `qr` sem `s.qr` — a janela entre
+        // duas rotações do código. O usuário lia "Capacidade atingida" por cima
+        // de "Gerando QR code…" e concluía, com razão, que nada acontecia.
+        // Mensagem de ação descreve a ÚLTIMA ação, então some quando o estado
+        // deixa de ser aquele. A pill e o stepper já dizem a fase.
+        cancelMsg.textContent = '';
       }
 
       if (fase === 'indisponivel') {
