@@ -43,6 +43,7 @@ const {
     donoDoSingletonLock, decidirSobreDono, pidsDoPerfil,
 } = require('./chromium_locks');
 const authStore = require('./auth_store');
+const sessionBackup = require('./session_backup');
 const sessionManifest = require('./session_manifest');
 const sendLedger = require('./idempotency_ledger');
 const { redactSensitive, installConsoleRedaction } = require('./safe_logging');
@@ -263,6 +264,9 @@ const SEND_RECONNECT_WAIT_MS = parseInt(process.env.WA_SEND_RECONNECT_WAIT_MS, 1
 // isso nao vale mais os 45s que existiam quando isto era um getChats completo.
 const GROUP_SYNC_TIMEOUT_MS = parseInt(process.env.GROUP_SYNC_TIMEOUT_MS, 10) || 15000;
 const QR_IDLE_DESTROY_MS = parseInt(process.env.QR_IDLE_DESTROY_MS, 10) || 180000;
+// Espera antes de copiar a credencial recém-conectada: tempo para o Chromium
+// assentar o IndexedDB. Copiar cedo demais guarda um estado incompleto.
+const BACKUP_APOS_CONECTAR_MS = parseInt(process.env.WA_BACKUP_DELAY_MS, 10) || 45000;
 // Tem de ser menor que o read timeout do Django. Inclui o tempo esperando a
 // cadeia da sessao, nao apenas o sendMessage do Chromium.
 const SEND_REQUEST_TIMEOUT_MS = parseInt(process.env.SEND_REQUEST_TIMEOUT_MS, 10) || 55000;
@@ -638,6 +642,7 @@ const createSessionState = (instanceId, organizationId = '') => ({
     enviosEmVoo: 0,         // >0 suprime o keepalive: o envio ja checa o estado
     stallsSeguidos: 0,      // timeouts de envio seguidos com a pagina viva
     recyclePendente: false, // um recycle agendado por sessao, nunca dois
+    backupTentado: false,   // um restauro de credencial por boot, nunca dois
     faseMsg: 'Iniciando serviço…',
 });
 
@@ -903,6 +908,10 @@ const purgeAuthDir = (session, reason) => {
         console.error(`[${session.id}] Purge recusado: vínculo de sessão inconsistente.`);
         return false;
     }
+    // A cópia morre junto. Purga acontece quando a credencial acabou de verdade —
+    // aparelho desvinculado, logout pedido —, e nesse caso a cópia é do mesmo
+    // vínculo morto: repô-la só devolveria a mesma recusa.
+    sessionBackup.descartar(session.authPath);
     return authStore.purgeAuthDir(authRootPath, session.authPath, reason);
 };
 const purgeAuthDirPorId = (instanceId, organizationId, reason) => {
@@ -912,6 +921,7 @@ const purgeAuthDirPorId = (instanceId, organizationId, reason) => {
         sessionManifest.quarantine(authPath, verified.status);
         return false;
     }
+    sessionBackup.descartar(authPath);
     return authStore.purgeAuthDir(authRootPath, authPath, reason);
 };
 const markPaired = (session) => authStore.markPaired(authRootPath, session.authPath);
@@ -1203,6 +1213,17 @@ const concluirPreparacao = (session, client) => {
     session.progresso = 100;
     session.faseMsg = 'Conectado. Sincronizando grupos antes de liberar envios…';
     console.log(`[${session.id}] WhatsApp pronto; iniciando sincronizacao inicial de grupos.`);
+
+    // Cópia da credencial só AGORA, com a sessão comprovadamente boa. Em
+    // `authenticated` o Chromium ainda está montando o armazenamento, e copiar ali
+    // guardaria a mesma metade que a cópia existe para reparar. O atraso deixa o
+    // IndexedDB assentar antes de a cópia ser lida — ver session_backup.js.
+    setTimeout(() => {
+        if (session.client !== client || !session.isConnected) return;
+        if (sessionBackup.salvar(session.authPath, 'conectado')) {
+            console.log(`[${session.id}] Credencial copiada para restauro futuro.`);
+        }
+    }, BACKUP_APOS_CONECTAR_MS).unref();
 
     // A versao e apenas telemetria. A chamada pode travar durante um rollout do
     // WhatsApp Web, entao nunca participa do gate de conexao ou do sync.
@@ -1728,6 +1749,33 @@ const initializeSession = (session) => {
         session.faseMsg = 'Aguardando leitura do QR Code…';
         registrarLifecycle(session, 'qr_generated');
         console.log(`[${session.id}] Sessão não encontrada ou expirada. QR disponivel na API.`);
+
+        // QR numa sessão que JÁ estava pareada significa que a credencial no disco
+        // foi recusada. Antes de mandar uma pessoa escanear de novo, tenta a cópia
+        // boa — é o caso do issue #5717 do whatsapp-web.js, em que o Chromium não
+        // termina de gravar os blobs do IndexedDB e a sessão fica pela metade sem
+        // que ninguém tenha desvinculado nada.
+        //
+        // UMA vez por boot. Se o aparelho foi desvinculado de verdade, repor a
+        // cópia dá na mesma recusa, e sem teto isso vira laço de restore/QR.
+        if (!session.backupTentado && hasStoredAuth(session.id)
+                && sessionBackup.temBackup(session.authPath)) {
+            session.backupTentado = true;
+            const info = sessionBackup.infoBackup(session.authPath);
+            if (sessionBackup.restaurar(session.authPath)) {
+                registrarLifecycle(session, 'backup_restaurado', {
+                    copia_de: info && info.criado_em,
+                });
+                console.warn(
+                    `[${session.id}] Credencial recusada; cópia de `
+                    + `${(info && info.criado_em) || 'data desconhecida'} reposta. Reiniciando.`);
+                recycleSession(session, 'credencial reposta do backup', false,
+                               'Recuperando a sessão salva…').catch((err) => {
+                    console.error(`[${session.id}] Falha ao reiniciar com a cópia:`, err.message);
+                });
+                return;
+            }
+        }
         scheduleQrIdleDestroy(session);
         // QR é uma credencial temporária. Ele existe somente no payload privado
         // da UI e nunca é impresso, mesmo se um env legado pedir o contrário.
