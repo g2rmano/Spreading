@@ -1,3 +1,4 @@
+import hashlib
 import re
 import time
 
@@ -23,6 +24,30 @@ from apps.accounts.rls import (
 # DDL desistir rápido e tentar de novo: com lock_timeout ele nunca fica na fila
 # atrás de uma transação viva (o que congelaria o app inteiro atrás dele), e tanto o
 # timeout quanto o deadlock viram uma tentativa perdida em vez de um deploy abortado.
+#
+# Faltava, porém, a parte que torna o retry suficiente. Duas coisas, ambas medidas
+# em 06/09/2026, quando DOIS deploys seguidos abortaram no release com "8 tentativas
+# disputaram lock com o tráfego vivo":
+#
+#   1. O lote inteiro vivia numa transação só. Um conflito em qualquer uma das 34
+#      tabelas desfazia as 34 e a tentativa seguinte recomeçava do zero — contra um
+#      worker que roda oito loops sem parar, a chance de 34 locks exclusivos caberem
+#      na mesma janela de 3s é pequena, e cai a cada tabela nova. Por tabela, cada
+#      transação precisa de UM lock por alguns milissegundos.
+#
+#   2. Quase todo esse DDL era no-op. As políticas já estavam aplicadas desde o
+#      primeiro deploy; ainda assim, todo release reescrevia as quatro políticas e
+#      pedia AccessExclusiveLock em cada tabela para reafirmar um ENABLE que já
+#      valia. Uma impressão digital do SQL gravada como COMMENT da tabela (que pega
+#      ShareUpdateExclusiveLock, e não bloqueia leitura nem escrita) deixa o caso
+#      comum — nada mudou — custar zero lock exclusivo.
+#
+# A rede de segurança é a verificação final: RLS é fronteira de segurança, então
+# ninguém sai daqui sem `relrowsecurity` E `relforcerowsecurity` em todas as tabelas.
+# O que deixou de abortar o deploy foi reaplicar política já correta; tabela
+# desprotegida continua sendo falha dura.
+# Prefixo do COMMENT que guarda a impressão digital do DDL desta tabela.
+_MARCA_PREFIXO = "spreading-rls:"
 _LOCK_TIMEOUT = "3s"
 _TENTATIVAS = 8
 _ESPERA_S = 5
@@ -60,10 +85,38 @@ class Command(BaseCommand):
             if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", role):
                 raise CommandError(f"Nome de role inválido: {role!r}")
 
+        if options["enable"]:
+            self._com_retry(
+                "contexto assinado",
+                lambda: self._instalar_contexto(system_role, migration_role),
+            )
+
+        aplicadas = puladas = 0
+        for table in ALL_TENANT_TABLES:
+            mudou = self._com_retry(
+                f'tabela "{table}"',
+                lambda t=table: self._aplicar_tabela(
+                    t, options, system_role, migration_role),
+            )
+            if mudou:
+                aplicadas += 1
+            else:
+                puladas += 1
+
+        if options["enable"]:
+            self._exigir_protecao_total()
+
+        self.stdout.write(self.style.SUCCESS(
+            f"RLS {'habilitado e forçado' if options['enable'] else 'desabilitado'}: "
+            f"{aplicadas} tabela(s) alterada(s), {puladas} já em dia, "
+            f"{len(ALL_TENANT_TABLES)} no total."
+        ))
+
+    def _com_retry(self, alvo, funcao):
+        """Executa uma unidade de DDL, cedendo a vez ao tráfego e voltando depois."""
         for tentativa in range(1, _TENTATIVAS + 1):
             try:
-                self._aplicar(options, system_role, migration_role)
-                break
+                return funcao()
             except OperationalError as e:
                 # Deadlock e lock_timeout são a MESMA situação vista de dois
                 # ângulos: uma transação viva estava no caminho. Qualquer outro
@@ -74,60 +127,95 @@ class Command(BaseCommand):
                     raise
                 if tentativa == _TENTATIVAS:
                     raise CommandError(
-                        f"RLS não aplicado: {_TENTATIVAS} tentativas disputaram lock "
-                        f"com o tráfego vivo. Último erro: {e}"
+                        f"RLS não aplicado em {alvo}: {_TENTATIVAS} tentativas "
+                        f"disputaram lock com o tráfego vivo. Último erro: {e}"
                     ) from e
                 self.stdout.write(
-                    f"Lock disputado com o tráfego (tentativa {tentativa}/{_TENTATIVAS}); "
+                    f"Lock disputado em {alvo} (tentativa {tentativa}/{_TENTATIVAS}); "
                     f"nova tentativa em {_ESPERA_S}s."
                 )
                 time.sleep(_ESPERA_S)
+        return False
 
-        self.stdout.write(self.style.SUCCESS(
-            f"RLS {'habilitado e forçado' if options['enable'] else 'desabilitado'} "
-            f"em {len(ALL_TENANT_TABLES)} tabelas."
-        ))
+    def _exigir_protecao_total(self):
+        """RLS é fronteira de segurança: ninguém passa daqui com tabela aberta."""
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT relname FROM pg_class WHERE relname = ANY(%s) "
+                "AND NOT (relrowsecurity AND relforcerowsecurity)",
+                [list(ALL_TENANT_TABLES)],
+            )
+            desprotegidas = sorted(row[0] for row in cursor.fetchall())
+        if desprotegidas:
+            raise CommandError(
+                "RLS ausente ou não forçado em: " + ", ".join(desprotegidas)
+            )
 
-    def _aplicar(self, options, system_role, migration_role):
-        """Uma passada do DDL. Tudo ou nada — se levantar, a transação reverte
-        inteira e a tentativa seguinte recomeça do zero."""
+    def _instalar_contexto(self, system_role, migration_role):
+        """Verificador HMAC e checagem de roles. Não toca em tabela de dados."""
         with transaction.atomic(), connection.cursor() as cursor:
-            # SET LOCAL: vale só nesta transação, não vaza para a conexão.
             cursor.execute(f"SET LOCAL lock_timeout = '{_LOCK_TIMEOUT}'")
             cursor.execute(
                 "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
                 [[system_role, migration_role]],
             )
-            found_roles = {row[0] for row in cursor.fetchall()}
-            missing_roles = {system_role, migration_role} - found_roles
-            if options["enable"] and missing_roles:
+            found = {row[0] for row in cursor.fetchall()}
+            faltando = {system_role, migration_role} - found
+            if faltando:
                 raise CommandError(
-                    "Roles exigidas pelo RLS não existem: "
-                    + ", ".join(sorted(missing_roles))
+                    "Roles exigidas pelo RLS não existem: " + ", ".join(sorted(faltando))
                 )
-            if options["enable"]:
-                self._install_signed_context(
-                    cursor,
-                    system_role=system_role,
-                    migration_role=migration_role,
-                )
-            for table in ALL_TENANT_TABLES:
-                if options["enable"]:
-                    for sql in policy_statements(
-                        table,
-                        mixed=table in MIXED_TENANT_TABLES,
-                        system_only=table in SYSTEM_ONLY_TABLES,
-                        system_role=system_role,
-                        migration_role=migration_role,
-                    ):
-                        cursor.execute(sql)
-                else:
-                    cursor.execute(
-                        f'ALTER TABLE "{table}" NO FORCE ROW LEVEL SECURITY'
-                    )
-                    cursor.execute(
-                        f'ALTER TABLE "{table}" DISABLE ROW LEVEL SECURITY'
-                    )
+            self._install_signed_context(
+                cursor, system_role=system_role, migration_role=migration_role)
+        return True
+
+    def _aplicar_tabela(self, table, options, system_role, migration_role):
+        """DDL de UMA tabela, na própria transação. Devolve se houve mudança.
+
+        Por tabela, e não em lote, porque o lote todo-ou-nada desfazia 34 tabelas
+        por causa de um conflito em uma — ver o cabeçalho do módulo.
+        """
+        if not options["enable"]:
+            with transaction.atomic(), connection.cursor() as cursor:
+                cursor.execute(f"SET LOCAL lock_timeout = '{_LOCK_TIMEOUT}'")
+                cursor.execute(f'ALTER TABLE "{table}" NO FORCE ROW LEVEL SECURITY')
+                cursor.execute(f'ALTER TABLE "{table}" DISABLE ROW LEVEL SECURITY')
+                cursor.execute(f'COMMENT ON TABLE "{table}" IS NULL')
+            return True
+
+        sqls = policy_statements(
+            table,
+            mixed=table in MIXED_TENANT_TABLES,
+            system_only=table in SYSTEM_ONLY_TABLES,
+            system_role=system_role,
+            migration_role=migration_role,
+        )
+        digital = _MARCA_PREFIXO + hashlib.sha256(
+            "|".join(sqls).encode("utf-8")).hexdigest()[:32]
+
+        # Caso comum: nada mudou desde o último deploy. Ler o COMMENT não pega lock
+        # nenhum, e sair aqui evita o AccessExclusiveLock que reafirmaria o que já
+        # vale. É isto que faz o release parar de brigar com o tráfego.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT obj_description(%s::regclass, 'pg_class'), "
+                "       relrowsecurity, relforcerowsecurity "
+                "FROM pg_class WHERE oid = %s::regclass",
+                [table, table],
+            )
+            linha = cursor.fetchone()
+        if linha and linha[0] == digital and linha[1] and linha[2]:
+            return False
+
+        with transaction.atomic(), connection.cursor() as cursor:
+            cursor.execute(f"SET LOCAL lock_timeout = '{_LOCK_TIMEOUT}'")
+            for sql in sqls:
+                cursor.execute(sql)
+            # A marca entra na MESMA transação do DDL: ou os dois valem, ou nenhum.
+            # Gravada separada do SQL, ela poderia sobreviver a um rollback e fazer
+            # o próximo deploy pular uma tabela que ficou sem política.
+            cursor.execute(f'COMMENT ON TABLE "{table}" IS %s', [digital])
+        return True
 
     def _install_signed_context(self, cursor, *, system_role, migration_role):
         """Instala o verificador HMAC sem conceder acesso ao segredo."""
