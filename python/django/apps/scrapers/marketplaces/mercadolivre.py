@@ -324,7 +324,32 @@ class MercadoLivre(Marketplace):
         )
 
     def is_alive(self, produto):
+        """Vivo pela vitrine primeiro; a PDP só como segunda opinião.
+
+        A PDP responde interstitial de verificação para este IP desde 08/2026, e
+        um interstitial não prova nada — nem que o anúncio existe, nem que sumiu.
+        Confiar só nela deixava o portão cego (200 sem os termos de "pausado" =
+        "vivo"); corrigir isso sem mais nada pararia o Mercado Livre inteiro, já
+        que nenhuma PDP é legível daqui.
+
+        `/ofertas` é a porta que responde. Estar na varredura do tique é prova
+        POSITIVA e forte: o item existe, está anunciado e o preço acabou de ser
+        lido — é a mesma leitura que `preco_ao_vivo` usa para revalidar. Não
+        estar não prova o contrário (a vitrine mostra um recorte), então aí sim
+        vale perguntar à PDP, que hoje devolve "indeterminado" quando bloqueada.
+        """
         from apps.scrapers.ofertas import esta_vivo
+        from apps.scrapers.preco_ao_vivo import varrer_ofertas_ml
+        from apps.scrapers.scraper_mercadolivre.link import _extrair_item_id
+
+        item = _extrair_item_id(str(getattr(produto, "link_produto", "") or ""))
+        if item:
+            try:
+                if item in varrer_ofertas_ml():
+                    return True
+            except Exception as exc:  # varredura é oportunista, nunca veredito
+                logger.info("varredura de ofertas indisponível em is_alive: %s",
+                            str(exc)[:120])
         return esta_vivo(produto)
 
     def buscar_por_termo(self, termo_busca, min_desconto=15, macro=None, usuario=None):

@@ -190,10 +190,30 @@ def esta_vivo(produto):
         "Este item não está mais",
         "Página não encontrada",
     ]
+    from apps.scrapers.scraper_mercadolivre.link_http import _motivo_bloqueio
     try:
         r = requests.get(produto.link_produto, headers=headers, timeout=5)
         if r.status_code in (404, 410):
             return False                      # confirmado: não existe mais
+        # Antes de qualquer conclusão: a resposta serve para julgar?
+        #
+        # Desde 08/2026 o Mercado Livre responde 200 com um interstitial de
+        # verificação para o IP da Fly. Nenhum dos termos de "pausado" aparece
+        # nesse HTML, então este portão devolvia True — "o produto existe" — para
+        # uma página que nunca foi vista. É o gate de disponibilidade do envio:
+        # cego assim, ele aprova anúncio morto.
+        #
+        # `_motivo_bloqueio` é o classificador que o caminho de verificação de
+        # link já usa para exatamente isto (challenge, /gz/, account-verification,
+        # 401/403/429, corpo curto sem componente do ML). Reusar em vez de
+        # reinventar mantém as duas decisões com o mesmo critério.
+        motivo = _motivo_bloqueio(r)
+        if motivo:
+            logger.info(
+                "Disponibilidade indeterminada para %s: %s",
+                getattr(produto, "id", "?"), motivo,
+            )
+            return None                       # bloqueado -> incerto, NÃO publica
         if r.status_code != 200:
             return None                       # 5xx/redirect estranho -> incerto, mantém
         for termo in termos_inativos:

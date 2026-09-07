@@ -3,10 +3,12 @@
 Aqui é onde um erro silencioso custa dinheiro: ou a mensagem anuncia preço
 errado, ou o envio é bloqueado sem necessidade.
 """
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from django.utils import timezone
 
 from apps.scrapers import preco_ao_vivo
 from apps.scrapers.models import ConfiguracaoEnvio, PrecoHistorico, Produto
@@ -93,7 +95,9 @@ class RevalidacaoTests(TestCase):
         self.assertEqual(self.produto.frase_llm, "")
         self.assertEqual(self.produto.nome_llm, "")
 
-    def test_api_indisponivel_e_inconclusivo_e_nao_bloqueia(self):
+    def test_api_indisponivel_com_leitura_recente_nao_bloqueia(self):
+        # A regra que já valia: uma janela de indisponibilidade não pode parar os
+        # envios. Continua valendo — enquanto a última leitura for recente.
         with patch("apps.scrapers.scraper_amazon.creators_api.get_items",
                    side_effect=RuntimeError("503")), \
              patch("apps.scrapers.scraper_amazon.creators_api.creds_de_usuario",
@@ -101,9 +105,27 @@ class RevalidacaoTests(TestCase):
             resultado = preco_ao_vivo.revalidar(self.produto, usuario=self.user)
 
         self.assertTrue(resultado["ok"])
-        self.assertEqual(resultado["fonte"], "inconclusivo")
+        self.assertEqual(resultado["fonte"], "ultima_leitura_recente")
         self.produto.refresh_from_db()
         self.assertEqual(self.produto.preco_com_cupom, 100.0)
+
+    def test_api_indisponivel_com_leitura_vencida_bloqueia(self):
+        # A metade que faltava. Sem medir agora e sem leitura recente, publicar é
+        # afirmar um preço que ninguém conferiu — foi assim que saiu a air fryer a
+        # R$ 199,90 cobrando R$ 249,50, com 1021 minutos de observação.
+        Produto.objects.filter(pk=self.produto.pk).update(
+            ultima_observacao=timezone.now() - timedelta(hours=20))
+        self.produto.refresh_from_db()
+
+        with patch("apps.scrapers.scraper_amazon.creators_api.get_items",
+                   side_effect=RuntimeError("503")), \
+             patch("apps.scrapers.scraper_amazon.creators_api.creds_de_usuario",
+                   return_value=object()):
+            resultado = preco_ao_vivo.revalidar(self.produto, usuario=self.user)
+
+        self.assertFalse(resultado["ok"])
+        self.assertEqual(resultado["fonte"], "sem_medicao")
+        self.assertIn("não confirmado", resultado["motivo"])
 
     def test_mudanca_registra_historico_de_preco(self):
         self._revalidar(_item_api(80.0, 200.0))
@@ -247,19 +269,59 @@ class RevalidacaoMercadoLivreTests(TestCase):
         _resultado, chamada = self._revalidar(_relatorio(1799.0, 2499.0))
         self.assertEqual(chamada.call_args.args[0], self.produto.link_produto)
 
-    def test_challenge_do_anti_bot_e_inconclusivo_e_nao_bloqueia(self):
+    def test_challenge_do_anti_bot_com_leitura_recente_nao_bloqueia(self):
         """A regra central: uma janela de bloqueio não pode parar os envios."""
         resultado, _ = self._revalidar(
             _relatorio(bloqueio="o Mercado Livre exigiu verificação"))
         self.assertTrue(resultado["ok"])
-        self.assertEqual(resultado["fonte"], "inconclusivo")
+        self.assertEqual(resultado["fonte"], "ultima_leitura_recente")
         self.produto.refresh_from_db()
         self.assertEqual(self.produto.preco_com_cupom, 1799.0)
+
+    def test_challenge_com_leitura_vencida_tenta_a_vitrine_e_bloqueia(self):
+        """Leitura velha + PDP bloqueada: resta a vitrine; sem ela, não publica.
+
+        É o cenário real deste IP desde 08/2026. O bloqueio não pode parar os
+        envios, mas também não pode virar licença para afirmar um preço que
+        ninguém leu.
+        """
+        Produto.objects.filter(pk=self.produto.pk).update(
+            ultima_observacao=timezone.now() - timedelta(hours=20))
+        self.produto.refresh_from_db()
+
+        # O `link_produto` deste fixture não tem um item id de verdade (MLB + 6
+        # dígitos); sem ele a varredura nem é consultada. Fixar o id aqui mantém o
+        # teste sobre a política, não sobre o formato da URL do fixture.
+        with patch("apps.scrapers.preco_ao_vivo.varrer_ofertas_ml",
+                   return_value={}) as vitrine, \
+                patch("apps.scrapers.scraper_mercadolivre.link._extrair_item_id",
+                      return_value="MLB123456"):
+            resultado, _ = self._revalidar(
+                _relatorio(bloqueio="o Mercado Livre exigiu verificação"))
+
+        vitrine.assert_called()
+        self.assertFalse(resultado["ok"])
+        self.assertEqual(resultado["fonte"], "sem_medicao")
+
+    def test_leitura_vencida_com_item_na_vitrine_publica_o_preco_lido(self):
+        Produto.objects.filter(pk=self.produto.pk).update(
+            ultima_observacao=timezone.now() - timedelta(hours=20))
+        self.produto.refresh_from_db()
+
+        with patch("apps.scrapers.preco_ao_vivo.varrer_ofertas_ml",
+                   return_value={"MLB123456": (1499.0, 2499.0)}), \
+                patch("apps.scrapers.scraper_mercadolivre.link._extrair_item_id",
+                      return_value="MLB123456"):
+            resultado, _ = self._revalidar(
+                _relatorio(bloqueio="o Mercado Livre exigiu verificação"))
+
+        self.assertTrue(resultado["ok"])
+        self.assertEqual(resultado["fonte"], "ml-ofertas-jit")
 
     def test_sem_sessao_do_ml_e_inconclusivo(self):
         resultado, _ = self._revalidar(_relatorio(1499.0), sessao=None)
         self.assertTrue(resultado["ok"])
-        self.assertEqual(resultado["fonte"], "inconclusivo")
+        self.assertEqual(resultado["fonte"], "ultima_leitura_recente")
         self.produto.refresh_from_db()
         self.assertEqual(self.produto.preco_com_cupom, 1799.0)
 

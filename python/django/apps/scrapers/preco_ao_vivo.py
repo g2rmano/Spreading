@@ -290,6 +290,54 @@ def _desconto(preco_de, preco):
     return (preco_de - preco) / preco_de * 100
 
 
+def _idade_da_leitura_min(produto):
+    """Minutos desde a última observação do produto, ou None se nunca houve.
+
+    Caveat honesto: `Produto.ultima_observacao` é `auto_now`, então qualquer
+    escrita na linha a renova, não só a leitura de preço. É a mesma medida que o
+    catálogo já usa como frescor (`maintenance.produtos_frescos_q`), e usar outra
+    aqui faria a tela e o envio discordarem sobre o que é "recente".
+    """
+    observado = getattr(produto, "ultima_observacao", None)
+    if observado is None:
+        return None
+    return (timezone.now() - observado).total_seconds() / 60.0
+
+
+def _limite_frescor_min() -> int:
+    return int(getattr(settings, "DEAL_FRESCOR_MAXIMO_MIN", 90) or 90)
+
+
+def _leitura_vencida(produto) -> bool:
+    idade = _idade_da_leitura_min(produto)
+    return idade is None or idade > _limite_frescor_min()
+
+
+def _sem_medicao(produto, atual, *, motivo="") -> dict:
+    """Não deu para medir agora. A última leitura serve — se for recente.
+
+    Antes isto devolvia `ok=True` sempre: "não consegui conferir, então mando com
+    o preço do banco". É como a air fryer saiu anunciada a R$ 199,90 cobrando
+    R$ 249,50 em 03/09/2026 — a observação tinha 1021 minutos.
+
+    `DEAL_FRESCOR_MAXIMO_MIN` existe desde aquele incidente, com o raciocínio
+    escrito em `settings.py`, e nunca foi lida por módulo nenhum. O catálogo trata
+    um produto como fresco por 48 h: folga correta para EXIBIR numa lista, folga
+    absurda para AFIRMAR um preço numa mensagem. Aqui vale a janela curta.
+    """
+    limite_min = _limite_frescor_min()
+    idade_min = _idade_da_leitura_min(produto)
+    if idade_min is not None and idade_min <= limite_min:
+        return _resultado(True, atual, fonte="ultima_leitura_recente",
+                          motivo=f"medida há {idade_min:.0f} min")
+    idade = "nunca observado" if idade_min is None else f"há {idade_min:.0f} min"
+    return _resultado(
+        False, atual, fonte="sem_medicao",
+        motivo=f"preço não confirmado agora e a última leitura foi {idade} "
+               f"(limite {limite_min} min): {motivo}".strip(),
+    )
+
+
 def revalidar(produto, usuario=None, configuracao=None, *, url="",
               exigir_medicao=False) -> dict:
     """Confere o preço ao vivo e atualiza o produto. Ver política no topo.
@@ -325,12 +373,17 @@ def revalidar(produto, usuario=None, configuracao=None, *, url="",
         logger.warning(
             "preco_ao_vivo inconclusivo %s id=%s: %s", mkt, getattr(produto, "pk", ""), exc,
         )
-        return _resultado(True, atual, fonte="inconclusivo", motivo=str(exc)[:120])
+        return _sem_medicao(produto, atual, motivo=str(exc)[:120])
 
     decorrido_ms = (time.monotonic() - inicio) * 1000
-    if vivo is None and exigir_medicao:
-        # Quem exige medição paga o preço dela. Sem esta passada, o bloqueio de IP
-        # do ML transforma "não consegui medir" em "publica com o preço velho".
+    if vivo is None and (exigir_medicao or _leitura_vencida(produto)):
+        # Segunda porta. A primeira fonte do ML passa pela PDP, que responde
+        # bloqueio a este IP; a varredura de `/ofertas` é a porta que responde.
+        #
+        # Só vale pagá-la quando a leitura guardada já não serve. Com leitura
+        # recente o envio segue sem custo nenhum — é a regra de que uma janela de
+        # bloqueio não pode parar os envios. Com leitura vencida, é isto ou não
+        # publicar; aí a varredura é barata perto de anunciar preço errado.
         cara = _FONTES_EXIGENTES.get(mkt)
         if cara is not None:
             try:
@@ -343,7 +396,7 @@ def revalidar(produto, usuario=None, configuracao=None, *, url="",
             "preco_ao_vivo %s id=%s fonte=inconclusivo ms=%.0f",
             mkt, getattr(produto, "pk", ""), decorrido_ms,
         )
-        return _resultado(True, atual, fonte="inconclusivo", motivo="sem dado ao vivo")
+        return _sem_medicao(produto, atual, motivo="sem dado ao vivo")
 
     novo = vivo["preco"]
     if mkt == "mercadolivre":
