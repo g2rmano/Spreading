@@ -63,7 +63,7 @@ class PrecoPublicavelTests(TestCase):
         self.assertNotIn("POR 100", texto)
         # O "DE" continua sendo a referência da vitrine riscada.
         self.assertIn("120", texto)
-        self.assertIn("CUPOM: ative na página da Amazon", texto)
+        self.assertIn("CUPOM: ative na Amazon — o preço já é com ele", texto)
 
     def test_produto_sem_cupom_mantem_o_preco_de_vitrine(self):
         produto = self._produto(
@@ -185,7 +185,7 @@ class MensagemDeProdutoDeCupomMLTests(TestCase):
 
         self.assertIn("POR 98,77", texto)
         self.assertNotIn("POR 113,74", texto)
-        self.assertIn("CUPOM: ative na página do Mercado Livre", texto)
+        self.assertIn("CUPOM: ative no Mercado Livre — o preço já é com ele", texto)
 
     def test_preco_efetivo_ml_sem_prova_direta_nao_e_publicado(self):
         produto = Produto.objects.create(
@@ -199,7 +199,7 @@ class MensagemDeProdutoDeCupomMLTests(TestCase):
         texto = montar_mensagem(produto, "https://meli.la/camera", None)
 
         self.assertIn("POR 113,74", texto)
-        self.assertNotIn("CUPOM: ative na página do Mercado Livre", texto)
+        self.assertNotIn("CUPOM: ative no Mercado Livre — o preço já é com ele", texto)
 
 
 class NormalizacaoDinheiroTests(TestCase):
@@ -363,5 +363,11 @@ class TelaOfertasMercadoLivreTests(TestCase):
         listado = resposta.context["produtos"][0]
         self.assertEqual(listado.preco_publicado, 93.60)
         self.assertContains(resposta, "R$ 93,60")
-        self.assertContains(resposta, "Cupom na página")
+        # O nome do teste cobra que a lista diga POR QUE mostra o pós-cupom.
+        # "Cupom na página" não dizia: nem qual cupom, nem que página — e a
+        # página não estava linkada em lugar nenhum da célula. O que a pessoa
+        # precisa saber antes de mandar a oferta é que não há código para copiar
+        # e que o desconto já está no número exibido.
+        self.assertContains(resposta, "Cupom já no preço")
+        self.assertContains(resposta, "sem código")
         self.assertNotContains(resposta, "sem cupom")

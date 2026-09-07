@@ -2978,9 +2978,12 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
         linha_cupom = f"🎟️ {m.bold(f'CUPOM: {esc(cod_item)}')}"
     elif (getattr(produto, "marketplace", "") == "amazon"
           and (getattr(produto, "evidencia", {}) or {}).get("promotion", {}).get("coupon_confirmed")):
-        linha_cupom = f"🎟️ {m.bold('CUPOM: ative na página da Amazon')}"
+        # Dizer só "ative na página" deixava a linha sem a informação que muda a
+        # decisão: o preço anunciado logo acima é o PÓS-cupom. Quem não ativasse
+        # pagava o outro valor e concluía, com razão, que o anúncio mentiu.
+        linha_cupom = f"🎟️ {m.bold('CUPOM: ative na Amazon — o preço já é com ele')}"
     elif _preco_cupom_inline_ml(produto):
-        linha_cupom = f"🎟️ {m.bold('CUPOM: ative na página do Mercado Livre')}"
+        linha_cupom = f"🎟️ {m.bold('CUPOM: ative no Mercado Livre — o preço já é com ele')}"
     else:
         # Códigos genéricos (CupomCodigo) são de checkout do ML — NÃO valem na Amazon.
         mkt = getattr(produto, "marketplace", "mercadolivre")
@@ -3683,7 +3686,7 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                 or (cupom.titulo if cupom else "")
                 or getattr(produto, "codigo_checkout", "")
                 or (
-                    "Ative na página do Mercado Livre"
+                    "Ative no Mercado Livre — o preço já é com ele"
                     if _preco_cupom_inline_ml(produto) else ""
                 )
             )
