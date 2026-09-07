@@ -47,6 +47,11 @@ _SAFE_SEND_FIELDS = frozenset({
     "sucesso", "via", "tipo", "instancia", "mensagem_id", "confirmacao",
     "resultado", "repetir", "ack", "etapa", "duracao_ms", "falha_infra",
     "classe", "erro", "causa",
+    # Quando a mensagem saiu, quanto o transporte demorou e quanto o ACK do
+    # WhatsApp levou para chegar. Sem estes três a tela volta a dizer só
+    # "Enviado": o worker passou a devolvê-los, e a allowlist os apagava antes de
+    # o Django ler. Medido no canário de 07/09: `ack=1` chegava, `ack_ms` não.
+    "enviado_em", "ack_ms", "transporte_ms",
 })
 
 

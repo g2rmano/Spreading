@@ -120,6 +120,27 @@ def _processar(perfil, nome_servico, campo, estado, agora, cooldown, enviar) -> 
     enviou = 0
 
     if not conectado:
+        # Nunca esteve de pé ≠ caiu. Uma integração que o usuário simplesmente
+        # não conectou (`sem_sessao`, sem histórico de sucesso) não é incidente:
+        # é passo de configuração pendente. Alarmar isso como erro enchia o
+        # relatório e o Sentry com "Amazon Relatórios de fulano está fora do ar"
+        # para um portal que ninguém jamais ligou — inclusive de contas de teste.
+        # Continua virando evento, para a tela de Saúde poder mostrar o que falta,
+        # mas em nível de aviso e sem e-mail.
+        nunca_conectou = anterior is None and estado.detalhe == "sem_sessao"
+        if nunca_conectou:
+            setattr(perfil, estado_attr, False)
+            perfil.save(update_fields=[estado_attr])
+            log_event(
+                "conexao", "conexao_ausente",
+                f"{nome_servico} de {perfil.user.get_username()} nunca foi conectado: "
+                f"{estado.motivo or 'falta configurar'}",
+                level="warning", usuario=perfil.user,
+                contexto={"servico": nome_servico, "motivo": estado.motivo,
+                          "detalhe": estado.detalhe,
+                          "availability_code": estado.availability_code},
+            )
+            return 0
         primeira_vez = anterior is not False        # True ou None -> acabou de cair
         cooldown_ok = ultimo_alerta is None or (agora - ultimo_alerta) >= cooldown
         if primeira_vez or cooldown_ok:

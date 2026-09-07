@@ -27,12 +27,26 @@ import time
 
 import requests
 from django.conf import settings
-from django.core.cache import cache
+from django.core.cache import caches
 
 from apps.scrapers import fly_infra
 from apps.scrapers.eventos import log_event
 
 logger = logging.getLogger(__name__)
+
+
+def _cache():
+    """Cache PERSISTENTE, não o `default`.
+
+    O `default` em produção é LocMemCache: por processo e morto a cada deploy. A
+    docstring do silêncio abaixo promete sobreviver a um restart do monitor — e
+    não sobrevivia, então cada deploy rearmava o alarme da mesma sessão. Em
+    06/09/2026 isso rendeu 24 eventos idênticos em seis horas.
+
+    Resolvido a cada chamada, não no import: prender o handle no import congela a
+    configuração e faz `override_settings(CACHES=...)` deixar de valer.
+    """
+    return caches["persistente"]
 
 _FALHAS_KEY = "wa_supervisor_falhas"
 _COOLDOWN_KEY = "wa_supervisor_cooldown"
@@ -43,6 +57,10 @@ _COOLDOWN_KEY = "wa_supervisor_cooldown"
 # encher EventoOperacional a cada sonda enquanto ninguém reconecta.
 _TRAVADA_KEY = "wa_supervisor_sessao_travada_avisada"
 _TRAVADA_SILENCIO_S = 3600
+# Marca desde quando a contagem está zerada. Ver `_avisar_sessao_travada`.
+_SAUDAVEL_DESDE_KEY = "wa_supervisor_saudavel_desde"
+# Quanto tempo de contagem zerada conta como recuperação de verdade.
+_RECUPERACAO_ESTAVEL_S = 900
 # O contador expira sozinho: se o monitor morrer no meio de uma sequência de
 # falhas, a contagem velha não pode viver para sempre e assombrar o processo novo.
 _FALHAS_TTL_S = 600
@@ -145,11 +163,23 @@ def _avisar_sessao_travada(corpo: dict) -> None:
         return
     total = travadas + repareamento
     if total <= 0:
-        cache.delete(_TRAVADA_KEY)
+        # Zero numa sonda não é recuperação: uma sessão que oscila entre "travada"
+        # e "sumiu do Map" zerava a contagem por um instante, apagava o silêncio, e
+        # o alarme voltava no próximo tique. Era isso, e não uma queda nova, que
+        # gerava um evento a cada poucos minutos. Só um período contínuo de saúde
+        # devolve o direito de alarmar.
+        primeiro_zero = _cache().get(_SAUDAVEL_DESDE_KEY)
+        agora = time.monotonic()
+        if primeiro_zero is None:
+            _cache().set(_SAUDAVEL_DESDE_KEY, agora, timeout=_TRAVADA_SILENCIO_S)
+        elif agora - float(primeiro_zero) >= _RECUPERACAO_ESTAVEL_S:
+            _cache().delete(_TRAVADA_KEY)
+            _cache().delete(_SAUDAVEL_DESDE_KEY)
         return
-    if cache.get(_TRAVADA_KEY):
+    _cache().delete(_SAUDAVEL_DESDE_KEY)
+    if _cache().get(_TRAVADA_KEY):
         return
-    cache.set(_TRAVADA_KEY, True, timeout=_TRAVADA_SILENCIO_S)
+    _cache().set(_TRAVADA_KEY, True, timeout=_TRAVADA_SILENCIO_S)
     if repareamento and not travadas:
         motivo = (f"{repareamento} sessão(ões) WhatsApp caíram e estão pedindo QR de "
                   f"novo. O worker responde, mas não envia até alguém reconectar.")
@@ -174,10 +204,10 @@ def _avisar_sessao_travada(corpo: dict) -> None:
 
 
 def _armar_cooldown(segundos: int) -> None:
-    cache.set(_COOLDOWN_KEY, time.time(), timeout=segundos)
+    _cache().set(_COOLDOWN_KEY, time.time(), timeout=segundos)
     # Zera a contagem: o boot leva ~1min e as sondas desse período não podem
     # herdar as falhas da encarnação anterior.
-    cache.set(_FALHAS_KEY, 0, timeout=_FALHAS_TTL_S)
+    _cache().set(_FALHAS_KEY, 0, timeout=_FALHAS_TTL_S)
 
 
 def _recuperar(falhas: int) -> str:
@@ -242,15 +272,15 @@ def verificar() -> str:
         return "sem_token"
     try:
         if _sonda_saudavel():
-            cache.set(_FALHAS_KEY, 0, timeout=_FALHAS_TTL_S)
+            _cache().set(_FALHAS_KEY, 0, timeout=_FALHAS_TTL_S)
             _avisar_sessao_travada(_ULTIMO_CORPO)
             return "ok"
-        falhas = cache.get(_FALHAS_KEY, 0) + 1
-        cache.set(_FALHAS_KEY, falhas, timeout=_FALHAS_TTL_S)
+        falhas = _cache().get(_FALHAS_KEY, 0) + 1
+        _cache().set(_FALHAS_KEY, falhas, timeout=_FALHAS_TTL_S)
         acao = decidir_acao(
             token=settings.FLY_API_TOKEN,
             falhas_seguidas=falhas,
-            em_cooldown=bool(cache.get(_COOLDOWN_KEY)),
+            em_cooldown=bool(_cache().get(_COOLDOWN_KEY)),
             falhas_limite=settings.WA_SUPERVISOR_FALHAS,
         )
         if acao != "reiniciar":

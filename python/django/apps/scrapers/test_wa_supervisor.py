@@ -1,6 +1,8 @@
 from unittest.mock import MagicMock, patch
 
-from django.core.cache import cache
+# O supervisor usa o cache PERSISTENTE (o `default` é LocMem por processo e
+# morre a cada deploy). O teste tem de falar com o mesmo.
+from apps.scrapers.wa_supervisor import _cache
 from django.test import SimpleTestCase, override_settings
 
 from apps.scrapers import wa_supervisor
@@ -12,6 +14,17 @@ _SETTINGS = dict(
     WA_MACHINE_APP="spreading-wa",
     FLY_API_TOKEN="token-teste",
     WHATSAPP_API_URL="http://wa-interno:3000",
+    # O supervisor usa o cache PERSISTENTE, que em produção é DatabaseCache. Estes
+    # testes são SimpleTestCase e não podem tocar o banco; o que eles precisam é de
+    # UM cache com estado, não daquele backend. `_cache()` resolve a cada chamada,
+    # então este override vale — prender o handle no import não deixaria.
+    CACHES={
+        "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"},
+        "persistente": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "wa-supervisor-testes",
+        },
+    },
 )
 
 
@@ -71,7 +84,7 @@ class VerificarTests(SimpleTestCase):
     API do Fly mockadas — nenhum IO real."""
 
     def setUp(self):
-        cache.clear()
+        _cache().clear()
         wa_supervisor._avisou_sem_token = False
         wa_supervisor._ULTIMO_CORPO = {}
 
@@ -96,11 +109,11 @@ class VerificarTests(SimpleTestCase):
         self.assertEqual(evento.call_args[1]["level"], "error")
 
     def test_sonda_ok_zera_o_contador(self):
-        cache.set("wa_supervisor_falhas", 2)
+        _cache().set("wa_supervisor_falhas", 2)
         with patch.object(wa_supervisor, "_sonda_saudavel", return_value=True), \
              patch.object(wa_supervisor.fly_infra, "reiniciar_maquina") as reiniciar:
             self.assertEqual(wa_supervisor.verificar(), "ok")
-        self.assertEqual(cache.get("wa_supervisor_falhas"), 0)
+        self.assertEqual(_cache().get("wa_supervisor_falhas"), 0)
         reiniciar.assert_not_called()
 
     def test_cooldown_impede_loop_de_restart(self):
@@ -171,7 +184,7 @@ class VerificarTests(SimpleTestCase):
 
     def test_falha_da_api_fly_nao_derruba_o_monitor(self):
         listar = MagicMock(side_effect=RuntimeError("API Fly fora"))
-        cache.set("wa_supervisor_falhas", 2)  # a próxima falha atinge o limite
+        _cache().set("wa_supervisor_falhas", 2)  # a próxima falha atinge o limite
         with patch.object(wa_supervisor, "_sonda_saudavel", return_value=False), \
              patch.object(wa_supervisor.fly_infra, "_listar_maquinas", listar):
             self.assertEqual(wa_supervisor.verificar(), "erro")
@@ -190,7 +203,7 @@ class SessaoTravadaTests(SimpleTestCase):
     """
 
     def setUp(self):
-        cache.clear()
+        _cache().clear()
         wa_supervisor._avisou_sem_token = False
         wa_supervisor._ULTIMO_CORPO = {}
 
@@ -260,11 +273,35 @@ class SessaoTravadaTests(SimpleTestCase):
             _, evento, _ = self._verificar_com_corpo(corpo)
             evento.assert_not_called()
 
-    def test_sessao_voltando_rearma_o_aviso(self):
+    def test_zero_momentaneo_nao_rearma_o_aviso(self):
+        """Uma sonda saudável no meio da oscilação não conta como recuperação.
+
+        Era assim que o alarme escapava do silêncio de uma hora: uma sessão que
+        oscila entre "travada" e "sumiu do Map" zerava a contagem por um instante,
+        apagava a chave, e o evento voltava no tique seguinte. Em 06/09/2026 foram
+        24 eventos idênticos em seis horas por causa disto.
+        """
         travado = {"sessions_total": 1, "sessions_ready": 0, "sessions_stuck": 1}
         saudavel = {"sessions_total": 1, "sessions_ready": 1, "sessions_stuck": 0}
         _, evento, _ = self._verificar_com_corpo(travado)
         self.assertEqual(evento.call_count, 1)
-        self._verificar_com_corpo(saudavel)   # reconectou: o silêncio é liberado
+        self._verificar_com_corpo(saudavel)      # piscada, não recuperação
+        _, evento, _ = self._verificar_com_corpo(travado)
+        self.assertEqual(evento.call_count, 0)   # segue calado
+
+    def test_saude_sustentada_rearma_o_aviso(self):
+        """Recuperação de verdade devolve o direito de alarmar."""
+        from unittest.mock import patch as _patch
+        travado = {"sessions_total": 1, "sessions_ready": 0, "sessions_stuck": 1}
+        saudavel = {"sessions_total": 1, "sessions_ready": 1, "sessions_stuck": 0}
+        _, evento, _ = self._verificar_com_corpo(travado)
+        self.assertEqual(evento.call_count, 1)
+
+        relogio = [1000.0]
+        with _patch("apps.scrapers.wa_supervisor.time.monotonic",
+                    side_effect=lambda: relogio[0]):
+            self._verificar_com_corpo(saudavel)   # marca o início da saúde
+            relogio[0] += 1000.0                  # mais que os 900s exigidos
+            self._verificar_com_corpo(saudavel)   # sustentou: libera o silêncio
         _, evento, _ = self._verificar_com_corpo(travado)
         self.assertEqual(evento.call_count, 1)
