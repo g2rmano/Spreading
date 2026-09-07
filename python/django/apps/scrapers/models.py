@@ -1045,6 +1045,34 @@ class RelatorioSync(models.Model):
         unique_together = ("usuario", "marketplace")
 
 
+class GastoIA(models.Model):
+    """Tokens de IA consumidos por mês, modelo e origem.
+
+    Sem `organization`: o teto de custo é do produto inteiro, não de um inquilino,
+    e atribuir por organização exigiria decidir o rateio de uma chamada que serve
+    ao catálogo compartilhado. Fica fora do RLS pelo mesmo motivo — não é dado de
+    ninguém.
+    """
+    competencia = models.DateField(db_index=True)   # sempre o dia 1 do mês
+    modelo = models.CharField(max_length=80)
+    origem = models.CharField(max_length=40)        # que parte do funil gastou
+    chamadas = models.PositiveIntegerField(default=0)
+    tokens_entrada = models.BigIntegerField(default=0)
+    tokens_saida = models.BigIntegerField(default=0)
+    atualizado_em = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["competencia", "modelo", "origem"],
+                name="gastoia_unico_por_mes_modelo_origem",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.competencia:%Y-%m} {self.origem} ({self.modelo})"
+
+
 class WorkerHeartbeat(models.Model):
     worker_id = models.CharField(max_length=120, unique=True)
     worker_type = models.CharField(max_length=40, db_index=True)

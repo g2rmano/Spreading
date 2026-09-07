@@ -494,6 +494,20 @@ def _incidentes(usuario, desde):
         agrupar(concluidos), key=lambda x: x["confirmado_em"], reverse=True)
 
 
+def _custo_ia() -> dict:
+    """Gasto de IA acumulado no mês. Nunca derruba a tela de Saúde."""
+    try:
+        from apps.scrapers import ia_custo
+        return ia_custo.resumo_do_mes()
+    except Exception:
+        logger.exception("Falha ao ler o gasto de IA do mês")
+        # `disponivel` em vez de custo None: no template do Django, `None` é
+        # resolvido como variável e vira string vazia — a comparação silenciosa
+        # daria sempre o mesmo resultado.
+        return {"disponivel": False, "custo_brl": 0, "teto_brl": 0,
+                "estourou": False, "por_origem": []}
+
+
 def resumo(horas: int = 24, agora=None, usuario=None, usuario_nome: str = "") -> dict:
     """Fotografia do período: veredito, problemas agrupados, sinais de vida, workers."""
     agora = agora or timezone.now()
@@ -548,5 +562,9 @@ def resumo(horas: int = 24, agora=None, usuario=None, usuario_nome: str = "") ->
         "conexoes": _conexoes_ao_vivo(usuario),
         "configuracao": _configuracao_silenciosa(),
         "manual_queue": queue_metrics,
+        # Gasto de IA do mês. Fica na Saúde, e não numa tela própria, porque é a
+        # mesma pergunta das outras linhas daqui: o sistema está dentro do que
+        # deveria? Um teto que ninguém observa não é teto.
+        "custo_ia": _custo_ia(),
         "total": qs.count(),
     }

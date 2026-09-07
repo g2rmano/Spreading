@@ -5,6 +5,8 @@ import re
 
 from django.conf import settings
 
+from apps.scrapers.ia_custo import registrar_uso
+
 logger = logging.getLogger(__name__)
 
 # Haiku por padrão: estas chamadas são curtas, estruturadas e de alto volume
@@ -209,6 +211,7 @@ def gerar_conteudo(nome: str, timeout: int = 30, preco=None,
             thinking={"type": "disabled"},
             messages=[{"role": "user", "content": _PROMPT.format(contexto=contexto)}],
         )
+        registrar_uso(resposta, origem="gerar_conteudo")
         dados = _json_resposta(_texto_resposta(resposta))
         if not isinstance(dados, dict):
             return vazio
@@ -390,6 +393,7 @@ def gerar_texto_deal(*, nome, categoria="", motivo="", tem_cupom=False,
                 "content": _PROMPT_DEAL.format(contexto=contexto),
             }],
         )
+        registrar_uso(resposta, origem="gerar_texto_deal")
         dados = _json_resposta(_texto_resposta(resposta))
         if not isinstance(dados, dict):
             return vazio
@@ -476,6 +480,7 @@ def gerar_nomes_curtos(nomes, timeout: int = 10) -> list[str]:
                 "content": _PROMPT_NOMES.format(produtos=produtos),
             }],
         )
+        registrar_uso(resposta, origem="gerar_nomes_curtos")
         dados = _json_resposta(_texto_resposta(resposta))
         if not isinstance(dados, list) or len(dados) != len(nomes):
             return [""] * len(nomes)
@@ -540,6 +545,7 @@ def avaliar_cupom_ia(*, escopo="", tipo_desconto="", valor_desconto=None,
                 "content": _PROMPT_AVALIACAO.format(contexto=contexto),
             }],
         )
+        registrar_uso(resposta, origem="avaliar_cupom_ia")
         dados = _json_resposta(_texto_resposta(resposta))
         if not isinstance(dados, dict):
             return vazio

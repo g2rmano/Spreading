@@ -640,6 +640,20 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 # cada chamada saía em Sonnet. A variável continua permitindo fixar outro
 # snapshot sem alterar código, quando houver motivo medido.
 LLM_MODELO = os.getenv("LLM_MODELO", "claude-haiku-4-5-20251001")
+# Preço por milhão de tokens, em dólar (entrada, saída). A chave casa por
+# substring do nome do modelo. Contar token é exato; converter para dinheiro é
+# uma tabela que envelhece — por isso ela mora aqui, visível, e não no código.
+LLM_PRECOS_USD_MTOK = {
+    "haiku": (1.0, 5.0),
+    "sonnet": (3.0, 15.0),
+    "opus": (5.0, 25.0),
+}
+LLM_CAMBIO_BRL = float(os.getenv("LLM_CAMBIO_BRL", "5.12"))
+# Teto mensal de gasto de IA, em reais. Zero desliga o alerta. NÃO bloqueia
+# chamada: a decisão registrada foi contador com aviso, não interruptor — um
+# corte automático no meio do mês deixaria o funil sem leitura de cupom sem que
+# ninguém tivesse escolhido isso.
+LLM_TETO_BRL_MES = float(os.getenv("LLM_TETO_BRL_MES", "74"))
 
 
 # ─────────────────────────────────────────────────────────────

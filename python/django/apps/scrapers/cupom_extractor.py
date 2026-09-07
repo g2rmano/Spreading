@@ -479,6 +479,7 @@ def extrair(texto: str, *, loja_padrao="", timeout=20) -> list[dict]:
         return fallback
 
     try:
+        from apps.scrapers.ia_custo import registrar_uso
         from apps.scrapers.llm import _cliente, _json_resposta, _texto_resposta
 
         resposta = _cliente(timeout).messages.create(
@@ -495,6 +496,7 @@ def extrair(texto: str, *, loja_padrao="", timeout=20) -> list[dict]:
             messages=[{"role": "user",
                        "content": _PROMPT.format(mensagem=texto[:2500])}],
         )
+        registrar_uso(resposta, origem="cupom_extractor")
         texto_resposta = _texto_resposta(resposta)
         try:
             dados = _json_resposta(texto_resposta)

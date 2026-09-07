@@ -159,6 +159,32 @@ bem quanto um worker parado.
 {% endif %}
 
 {% comment %}
+Gasto de IA aqui e não numa tela própria: é a mesma pergunta do resto da Saúde —
+o sistema está dentro do que deveria? Sem esta linha, "quanto a IA gastou" só
+tinha resposta no console da Anthropic.
+{% endcomment %}
+{% if r.custo_ia.disponivel %}
+<section class="section section-lined">
+  <div class="section-head"><h2>IA no mês</h2></div>
+  <div class="rows">
+    <div class="row-item">
+      <span class="dot {% if r.custo_ia.estourou %}off{% else %}on{% endif %}"></span>
+      <span class="row-nome">R$ {{ r.custo_ia.custo_brl|floatformat:2 }}{% if r.custo_ia.teto_brl %} de R$ {{ r.custo_ia.teto_brl|floatformat:2 }}{% endif %}</span>
+      <span class="row-estado">{% if r.custo_ia.estourou %}Acima do teto{% else %}Dentro do teto{% endif %}</span>
+    </div>
+    {% for linha in r.custo_ia.por_origem %}
+    <div class="row-item">
+      <span class="row-nome">{{ linha.origem }}</span>
+      <span class="row-estado">R$ {{ linha.custo_brl|floatformat:2 }} · {{ linha.chamadas }} chamada{{ linha.chamadas|pluralize }} · {{ linha.tokens_entrada }} entrada / {{ linha.tokens_saida }} saída</span>
+    </div>
+    {% empty %}
+    <div class="row-item"><span class="row-nome">Nenhuma chamada neste mês</span></div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{% comment %}
 Workers antes dos problemas: se um worker está parado, a lista de erros abaixo está
 mentindo por omissão — nada roda, então nada falha.
 {% endcomment %}
