@@ -93,6 +93,11 @@ jobs:
           for db in spreading template1; do
             psql -h localhost -U postgres -d "$db" -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public'
           done
+      # Antes do migrate: a 0061 cria policies que chamam
+      # `tenant_security.context_valid`, entao o schema assinado tem de existir
+      # primeiro. Num banco ja provisionado isto e no-op.
+      - name: Instala o contexto assinado
+        run: RELEASE_COMMAND=1 python django/manage.py tenant_rls --only-context
       - name: Migra com a role de migracao (o mesmo caminho do release_command)
         run: RELEASE_COMMAND=1 python django/manage.py migrate --noinput
       # Depois do migrate: antes disso nao ha tabela para dar privilegio sobre.

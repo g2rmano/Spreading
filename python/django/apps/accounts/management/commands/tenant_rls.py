@@ -61,6 +61,14 @@ class Command(BaseCommand):
         action.add_argument("--enable", action="store_true")
         action.add_argument("--disable", action="store_true")
         action.add_argument("--status", action="store_true")
+        # Instala SÓ o schema `tenant_security` (segredo + verificador HMAC) e
+        # sai. Existe porque um banco vazio não consegue migrar: a 0061 cria
+        # policies que chamam `tenant_security.context_valid`, e quem cria esse
+        # schema é o --enable, que só roda DEPOIS do migrate. Em produção isso
+        # nunca apareceu porque o schema já existia de um deploy anterior — mas
+        # provisionar do zero, ou restaurar um backup num banco novo, quebra em
+        # `schema "tenant_security" does not exist`.
+        action.add_argument("--only-context", action="store_true")
         parser.add_argument(
             "--system-role", default=settings.TENANT_SYSTEM_DB_ROLE,
         )
@@ -85,11 +93,16 @@ class Command(BaseCommand):
             if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", role):
                 raise CommandError(f"Nome de role inválido: {role!r}")
 
-        if options["enable"]:
+        if options["enable"] or options["only_context"]:
             self._com_retry(
                 "contexto assinado",
                 lambda: self._instalar_contexto(system_role, migration_role),
             )
+        if options["only_context"]:
+            self.stdout.write(
+                "Contexto assinado instalado; nenhuma policy tocada."
+            )
+            return
 
         aplicadas = puladas = 0
         for table in ALL_TENANT_TABLES:
