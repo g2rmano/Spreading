@@ -25,6 +25,103 @@ jobs:
       - run: python django/manage.py makemigrations --check --dry-run
       - run: python django/manage.py test apps.scrapers apps.accounts
 
+  # A suite acima roda em SQLite, onde nao existe RLS, nem constraint parcial,
+  # nem o ramo PostgreSQL do lease. Foi exatamente ai que a producao divergiu do
+  # verde: os testes do redirect passavam enquanto todo link publicado respondia
+  # 404 em producao, porque a policy de tenant escondia a linha do visitante
+  # anonimo. Este job roda o mesmo DDL que o release_command aplica em producao,
+  # e depois a suite inteira contra Postgres.
+  postgres:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+    services:
+      db:
+        # Mesma major da producao (spreading-db roda postgres-flex 17.x).
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: spreading
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      APP_ENV: test
+      DJANGO_DEBUG: "0"
+      DJANGO_SECRET_KEY: ci-somente-para-testes-nao-vale-em-lugar-nenhum
+      TENANT_CONTEXT_SIGNING_KEY: ci-chave-de-assinatura-de-contexto-para-testes
+      # As tres roles do desenho multi-tenant. Senhas descartaveis de um servico
+      # que so existe dentro deste job.
+      DATABASE_URL: postgres://spreading_runtime:ci@localhost:5432/spreading
+      SYSTEM_DATABASE_URL: postgres://spreading_system:ci@localhost:5432/spreading
+      MIGRATION_DATABASE_URL: postgres://spreading_migration:ci@localhost:5432/spreading
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: python/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: python -m playwright install --with-deps chromium
+      # Mesmas tres roles e mesmos privilegios que `deploy/phase0-remote-bootstrap.py`
+      # instala em producao. Sao a base do desenho: a role que atende requisicao
+      # NAO pode ser dona das tabelas nem ter BYPASSRLS, senao a policy nao vale
+      # nada — e e justamente isso que o probe mais abaixo cobra.
+      - name: Cria as roles e a extensao que o RLS assinado exige
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          psql -h localhost -U postgres -d spreading -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE spreading_migration LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD 'ci';
+          CREATE ROLE spreading_system    LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD 'ci';
+          -- CREATEDB so no runtime: e ele quem cria o banco de teste do Django.
+          CREATE ROLE spreading_runtime   LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD 'ci' CREATEDB;
+          GRANT CONNECT ON DATABASE spreading TO spreading_runtime, spreading_system, spreading_migration;
+          ALTER DATABASE spreading OWNER TO spreading_migration;
+          GRANT USAGE ON SCHEMA public TO spreading_runtime, spreading_system;
+          GRANT USAGE, CREATE ON SCHEMA public TO spreading_migration;
+          SQL
+          # pgcrypto no template1 tambem: o banco de teste nasce clonando dele, e
+          # o verificador de contexto assinado depende do hmac.
+          for db in spreading template1; do
+            psql -h localhost -U postgres -d "$db" -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public'
+          done
+      - name: Migra com a role de migracao (o mesmo caminho do release_command)
+        run: RELEASE_COMMAND=1 python django/manage.py migrate --noinput
+      # Depois do migrate: antes disso nao ha tabela para dar privilegio sobre.
+      - name: Da a runtime e a system o acesso as tabelas
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          psql -h localhost -U postgres -d spreading -v ON_ERROR_STOP=1 <<'SQL'
+          GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public
+            TO spreading_runtime, spreading_system;
+          GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public
+            TO spreading_runtime, spreading_system;
+          ALTER DEFAULT PRIVILEGES FOR ROLE spreading_migration IN SCHEMA public
+            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES
+            TO spreading_runtime, spreading_system;
+          ALTER DEFAULT PRIVILEGES FOR ROLE spreading_migration IN SCHEMA public
+            GRANT USAGE, SELECT, UPDATE ON SEQUENCES
+            TO spreading_runtime, spreading_system;
+          SQL
+      - name: Instala as constraints de tenant
+        run: RELEASE_COMMAND=1 python django/manage.py tenant_constraints --ensure
+      - name: Aplica o RLS assinado
+        run: RELEASE_COMMAND=1 python django/manage.py tenant_rls --enable
+      - name: Prova, com a role runtime, que GUC falsificado nao atravessa tenant
+        run: python django/manage.py tenant_isolation_probe
+      - name: Suite completa contra PostgreSQL
+        run: python django/manage.py test apps.scrapers apps.accounts
+
   whatsapp:
     runs-on: ubuntu-latest
     defaults:

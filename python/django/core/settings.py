@@ -47,6 +47,18 @@ if APP_ENV not in {"development", "test", "staging", "production"}:
 if not DEBUG and SECRET_KEY.startswith("django-insecure"):
     raise RuntimeError("Defina DJANGO_SECRET_KEY no .env antes de rodar com DEBUG=0.")
 
+# DEBUG ligado num ambiente que serve gente é falha de configuração, não modo de
+# operação: além das páginas de erro com stack e settings, é ele que habilita o
+# autologin de superusuário mais abaixo. O default de DEBUG olha FLY_APP_NAME, e
+# essa é justamente a variável que some quando a MESMA imagem roda em qualquer
+# outro lugar — então a proteção não pode depender só dele. Aqui é fechar a
+# porta: staging e produção não sobem com DEBUG, param.
+if DEBUG and APP_ENV in {"staging", "production"}:
+    raise ImproperlyConfigured(
+        f"DEBUG está ligado com APP_ENV={APP_ENV}. "
+        "Defina DJANGO_DEBUG=0 ou corrija APP_ENV antes de subir."
+    )
+
 # Hosts liberados (CSV no .env). Em dev cai no localhost.
 # Default cobre Fly.io (.fly.dev) e túnel do cloudflare (.trycloudflare.com).
 ALLOWED_HOSTS = [h.strip() for h in os.getenv("DJANGO_ALLOWED_HOSTS", ".fly.dev,.trycloudflare.com").split(",") if h.strip()]
@@ -277,8 +289,15 @@ MIDDLEWARE.insert(
 )
 
 # DEV: auto-login local (dispensa a tela de login). Roda ANTES do LoginRequired
-# para já entregar um request.user autenticado. Só em DEBUG; no-op em produção.
-if DEBUG and os.getenv("DEV_AUTOLOGIN", "1") != "0":
+# para já entregar um request.user autenticado.
+#
+# Exige DEBUG **e** um APP_ENV de desenvolvimento. Só DEBUG não bastava: ele
+# nasce ligado sempre que FLY_APP_NAME não existe, que é o caso de qualquer host
+# fora da Fly rodando esta mesma imagem — e este middleware cria e autentica um
+# SUPERUSUÁRIO para requisição anônima. Duas condições independentes têm de estar
+# erradas ao mesmo tempo para o painel abrir sozinho.
+if (DEBUG and APP_ENV in {"development", "test"}
+        and os.getenv("DEV_AUTOLOGIN", "1") != "0"):
     MIDDLEWARE.insert(
         MIDDLEWARE.index('django.contrib.auth.middleware.LoginRequiredMiddleware'),
         'core.middleware.DevAutoLoginMiddleware',

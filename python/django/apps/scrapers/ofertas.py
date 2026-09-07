@@ -2678,8 +2678,9 @@ def preco_publicavel(produto) -> float:
 
     `preco_com_cupom` guarda a vitrine; quando a fonte comprova um terceiro preço
     ativável (cupons oficiais da Amazon ou badge "com Cupom" do ML), o valor pago
-    fica em `preco_efetivo`. No ML ele só é aceito junto da evidência direta do
-    card/PDP, para não confundir cálculo de campanha com preço observado.
+    fica em `preco_efetivo`. No ML ele só é aceito com o badge lido na PRÓPRIA
+    PDP: o card da vitrine anuncia cupom que a página não cobra (ver
+    FONTES_CUPOM_INLINE_ML).
     """
     atual = getattr(produto, "preco_com_cupom", 0) or 0
     if getattr(produto, "marketplace", "") == "mercadolivre":
@@ -2689,8 +2690,21 @@ def preco_publicavel(produto) -> float:
     return efetivo if 0 < efetivo < atual else atual
 
 
+# O card da vitrine ANUNCIA cupom; a página do anúncio é quem COBRA. Medido em
+# 06/09/2026 no produto 80220 (MLB63561701, Loren Shower Ultra 7,5 kW): o card de
+# `/ofertas` trazia "R$ 93,60 com cupom" às 23:14 UTC e a PDP aberta pelo cliente
+# no mesmo dia cobrava R$ 117, sem cupom nenhum no buybox. Por isso `offer-card`
+# vale como INDÍCIO e não como prova de preço: só `pdp-live` — o badge lido na
+# própria página, em `preco_ao_vivo._aplicar_cupom_ml` — libera o pós-cupom.
+#
+# Consequência aceita: quando o ML desafia o IP da Fly, a revalidação é
+# inconclusiva e o item sai pela vitrine. Anunciar R$ 93,60 e a página cobrar
+# R$ 117 é pior do que anunciar os R$ 117 que ela cobra.
+FONTES_CUPOM_INLINE_ML = {"pdp-live"}
+
+
 def _preco_cupom_inline_ml(produto) -> float:
-    """Terceiro preço comprovado diretamente no card/PDP do Mercado Livre."""
+    """Terceiro preço comprovado na PDP do Mercado Livre. Ver FONTES_CUPOM_INLINE_ML."""
     if getattr(produto, "marketplace", "") != "mercadolivre":
         return 0.0
     atual = getattr(produto, "preco_com_cupom", 0) or 0
@@ -2698,7 +2712,7 @@ def _preco_cupom_inline_ml(produto) -> float:
     promocao = (getattr(produto, "evidencia", {}) or {}).get("promotion") or {}
     if not promocao.get("coupon_confirmed"):
         return 0.0
-    if promocao.get("source") not in {"offer-card", "pdp-live"}:
+    if promocao.get("source") not in FONTES_CUPOM_INLINE_ML:
         return 0.0
     try:
         observado = float(promocao.get("coupon_final_price") or efetivo)
@@ -2717,7 +2731,7 @@ def anotacao_preco_publicado():
     aparecia com um valor na lista e saía com outro no WhatsApp.
 
     O ML tem porteiro próprio, o mesmo de `_preco_cupom_inline_ml`: o terceiro
-    preço só conta com a evidência direta do card/PDP. Sem esta condição a
+    preço só conta com o badge lido na PDP. Sem esta condição a
     anotação era `min(vitrine, efetivo)` para todo mundo, e um `preco_efetivo`
     de cupom que já expirou fazia a lista mostrar R$ 93,60 enquanto a mensagem
     publicava os R$ 117 da vitrine — a divergência que esta função existe para
@@ -2740,13 +2754,14 @@ def anotacao_preco_publicado():
     )
     # Sem negação de propósito: `~Q(...)` sobre chave de JSON ausente vira NULL e
     # a linha cairia no `default`, que é justamente o ramo errado para o ML.
+    fontes = None
+    for fonte in sorted(FONTES_CUPOM_INLINE_ML):
+        condicao = Q(evidencia__promotion__source=fonte)
+        fontes = condicao if fontes is None else (fontes | condicao)
     cupom_inline_ml = Q(
         marketplace="mercadolivre",
         evidencia__promotion__coupon_confirmed=True,
-    ) & (
-        Q(evidencia__promotion__source="offer-card")
-        | Q(evidencia__promotion__source="pdp-live")
-    )
+    ) & fontes
     return Case(
         When(cupom_inline_ml, then=pos_cupom),
         When(marketplace="mercadolivre", then=F("preco_com_cupom")),

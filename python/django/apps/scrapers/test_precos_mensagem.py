@@ -230,3 +230,138 @@ class NormalizacaoDinheiroTests(TestCase):
         for valor, esperado in casos:
             with self.subTest(valor=valor):
                 self.assertEqual(_preco_br(valor), esperado)
+
+
+class ParidadeMercadoLivreTests(TestCase):
+    """No ML o pós-cupom só vale com evidência direta do card/PDP.
+
+    A tela anotava `min(vitrine, efetivo)` para todo mundo, enquanto a mensagem
+    exigia a evidência. Item com `preco_efetivo` velho aparecia na lista por
+    R$ 93,60 e a mensagem publicava os R$ 117 da vitrine.
+    """
+
+    def _produto(self, indice, **campos):
+        base = {
+            "owner": None, "marketplace": "mercadolivre", "origem": "oferta",
+            "estado": "ativo", "nome": "Chuveiro Loren Shower",
+            "link_produto": f"https://www.mercadolivre.com.br/c/p/MLB{indice}",
+            "preco_sem_desconto": 398.90, "preco_com_cupom": 117.0,
+            "preco_efetivo": 93.60, "evidencia": {},
+        }
+        base.update(campos)
+        return Produto.objects.create(**base)
+
+    def _anotado(self, produto):
+        return (Produto.objects.filter(pk=produto.pk)
+                .annotate(preco_publicado=anotacao_preco_publicado())
+                .first().preco_publicado)
+
+    def test_efetivo_sem_evidencia_nao_vira_preco_de_tela(self):
+        produto = self._produto(1)
+        self.assertEqual(preco_publicavel(produto), 117.0)
+        self.assertEqual(self._anotado(produto), 117.0)
+
+    def test_cupom_so_do_card_nao_vira_preco(self):
+        """Caso medido em 06/09/2026 (produto 80220, MLB63561701).
+
+        O card de `/ofertas` anunciava "R$ 93,60 com cupom" e a PDP cobrava
+        R$ 117. O card é indício; a página é quem cobra.
+        """
+        produto = self._produto(2, evidencia={"promotion": {
+            "present": True, "coupon_confirmed": True,
+            "coupon_final_price": 93.60, "source": "offer-card",
+        }})
+        self.assertEqual(preco_publicavel(produto), 117.0)
+        self.assertEqual(self._anotado(produto), 117.0)
+
+    def test_evidencia_de_outra_fonte_nao_libera_o_pos_cupom(self):
+        produto = self._produto(3, evidencia={"promotion": {
+            "present": True, "coupon_confirmed": True,
+            "coupon_final_price": 93.60, "source": "campanha",
+        }})
+        self.assertEqual(preco_publicavel(produto), 117.0)
+        self.assertEqual(self._anotado(produto), 117.0)
+
+    def test_cupom_nao_confirmado_nao_libera_o_pos_cupom(self):
+        produto = self._produto(4, evidencia={"promotion": {
+            "present": True, "coupon_confirmed": False, "source": "offer-card",
+        }})
+        self.assertEqual(preco_publicavel(produto), 117.0)
+        self.assertEqual(self._anotado(produto), 117.0)
+
+    def test_badge_lido_na_pdp_vale_nas_duas_pontas(self):
+        produto = self._produto(5, evidencia={"promotion": {
+            "present": True, "coupon_confirmed": True,
+            "coupon_final_price": 93.60, "source": "pdp-live",
+        }})
+        self.assertEqual(preco_publicavel(produto), 93.60)
+        self.assertEqual(self._anotado(produto), 93.60)
+
+
+class TelaOfertasMercadoLivreTests(TestCase):
+    """A linha da vitrine tem de dizer o mesmo que a mensagem — e dizer de onde
+    vem o número. Item com `preco_efetivo` de um cupom não comprovado aparecia
+    por R$ 93,60 ao lado do rótulo "sem cupom", enquanto a página cobrava R$ 117.
+    """
+
+    def setUp(self):
+        from django.urls import reverse
+
+        self.user = get_user_model().objects.create_user("vitrine-ml", password="x")
+        self.user.perfil.marcar_verificado()
+        self.client.force_login(self.user)
+        self.url = reverse("scraper-top")
+
+    def _produto(self, indice, evidencia):
+        from apps.scrapers.models import LinkAfiliadoUsuario
+
+        produto = Produto.objects.create(
+            owner=None, marketplace="mercadolivre", origem="oferta", estado="ativo",
+            nome="Chuveiro Loren Shower", preco_sem_desconto=398.90,
+            preco_com_cupom=117.0, preco_efetivo=93.60, evidencia=evidencia,
+            link_produto=f"https://www.mercadolivre.com.br/c/p/MLB{indice}",
+        )
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=produto, estado="pronto", afiliado_ok=True,
+            link_afiliado=f"https://meli.la/{indice}", verificado_ok=True,
+            url_canonica=f"https://meli.la/{indice}",
+        )
+        return produto
+
+    def test_sem_evidencia_a_lista_mostra_a_vitrine(self):
+        self._produto(11, {})
+
+        resposta = self.client.get(self.url, {"loja": "mercadolivre"})
+
+        listado = resposta.context["produtos"][0]
+        self.assertEqual(listado.preco_publicado, 117.0)
+        self.assertContains(resposta, "R$ 117,00")
+        self.assertNotContains(resposta, "R$ 93,60")
+        self.assertContains(resposta, "sem cupom")
+
+    def test_cupom_so_do_card_nao_muda_a_lista(self):
+        self._produto(13, {"promotion": {
+            "present": True, "coupon_confirmed": True,
+            "coupon_final_price": 93.60, "source": "offer-card",
+        }})
+
+        resposta = self.client.get(self.url, {"loja": "mercadolivre"})
+
+        listado = resposta.context["produtos"][0]
+        self.assertEqual(listado.preco_publicado, 117.0)
+        self.assertContains(resposta, "R$ 117,00")
+        self.assertContains(resposta, "sem cupom")
+
+    def test_com_badge_da_pdp_a_lista_mostra_o_pos_cupom_e_diz_por_que(self):
+        self._produto(12, {"promotion": {
+            "present": True, "coupon_confirmed": True,
+            "coupon_final_price": 93.60, "source": "pdp-live",
+        }})
+
+        resposta = self.client.get(self.url, {"loja": "mercadolivre"})
+
+        listado = resposta.context["produtos"][0]
+        self.assertEqual(listado.preco_publicado, 93.60)
+        self.assertContains(resposta, "R$ 93,60")
+        self.assertContains(resposta, "Cupom na página")
+        self.assertNotContains(resposta, "sem cupom")

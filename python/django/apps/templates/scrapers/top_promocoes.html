@@ -699,6 +699,12 @@ consultas agregadas que alimentam esta faixa.
                 {% elif p.afiliado_estado == "verificando" %}<span class="badge badge-muted" title="Conferindo se o link abre o anúncio certo antes de liberar o envio."><i data-lucide="loader"></i> verificando</span>
                 {% elif p.afiliado_estado == "erro" %}<span class="badge badge-red" title="{% if diagnostico %}{{ p.afiliado_motivo|default:'A geração do link falhou.' }}{% else %}A geração do link falhou; será tentada de novo.{% endif %}"><i data-lucide="alert-circle"></i> erro</span>
                 {% else %}<span class="badge badge-yellow" title="{% if diagnostico and p.afiliado_motivo %}{{ p.afiliado_motivo }} — nova tentativa em instantes.{% else %}Na fila para gerar o link de afiliado.{% endif %}"><i data-lucide="clock"></i> pendente</span>{% endif %}
+                {% comment %}
+                Mesmo carimbo da aba Cupons. O preço da lista é o da última leitura,
+                não o da página agora: sem a idade, uma leitura de ontem parecia
+                divergência do sistema quando a loja é que mudou o preço.
+                {% endcomment %}
+                {% if p.ultima_observacao %}<span class="tech-tag">Atualizado há {{ p.ultima_observacao|timesince }}</span>{% endif %}
               </div>
               {% if p.motivos_score %}
               <div class="muted" style="font-size:11.5px;margin-top:.3rem;"><i data-lucide="sparkles"></i> {{ p.motivos_score|join:" · " }}</div>
@@ -711,6 +717,8 @@ consultas agregadas que alimentam esta faixa.
           {% if p.cupom %}
             <a class="link" href="{{ p.cupom.link_original }}" target="_blank" rel="noopener" style="font-size:12.5px;">{{ p.cupom.titulo }}</a>
             <div class="muted" style="font-size:11.5px;">{% if p.cupom.tipo_desconto == 'fixo' %}- R$ {{ p.cupom.valor_desconto|floatformat:2 }}{% else %}- {{ p.cupom.valor_desconto|floatformat:0 }}%{% endif %}</div>
+          {% elif p.cupom_inline_ml %}
+            <span class="badge badge-accent" title="O preço já é o do cupom; ele é ativado na própria página do Mercado Livre"><i data-lucide="ticket"></i> Cupom na página</span>
           {% else %}<span class="muted" style="font-size:12px;">Oferta de preço · sem cupom</span>{% endif %}
           </div>
         </td>

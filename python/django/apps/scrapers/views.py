@@ -2896,8 +2896,14 @@ def top_promocoes(request):
         from apps.scrapers.precos import chave_produto, stats_em_lote
         historico = stats_em_lote(produtos, dias=30)
 
+        from apps.scrapers.ofertas import _preco_cupom_inline_ml
+
         for p in produtos:
             p.cupom = cupons_map.get(p.campanha_id)
+            # Preço já é o pós-cupom do próprio ML (badge "com Cupom" do card/PDP).
+            # Sem esta marca a linha dizia "sem cupom" ao lado de um valor que só
+            # existe depois de ativar o cupom na página.
+            p.cupom_inline_ml = bool(_preco_cupom_inline_ml(p))
             p.ja_enviado = p.id in ja_enviados
             p.motivos_score = [f"{p.percent:.0f}% de desconto"]
             hist_preco = historico.get(chave_produto(p))

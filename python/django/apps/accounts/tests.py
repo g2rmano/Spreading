@@ -19,6 +19,7 @@ from django.core.exceptions import (
 from django.test import (
     SimpleTestCase, TestCase, TransactionTestCase, override_settings,
 )
+from django.db import connection
 from django.urls import reverse
 from django.utils import timezone
 
@@ -854,3 +855,112 @@ class ContextoDeOrganizacaoCacheadoTests(TestCase):
         with self.assertNumQueries(0):
             organization = organization_for_user(response.wsgi_request.user)
         self.assertEqual(organization.pk, self.organization.pk)
+
+
+class DebugFechaEmProducaoTests(SimpleTestCase):
+    """DEBUG ligado com APP_ENV de produção tem de impedir o processo de subir.
+
+    O default de DEBUG olha `FLY_APP_NAME`, e essa é exatamente a variável que
+    some quando a MESMA imagem roda fora da Fly. Sem esta trava, um host qualquer
+    subia com DEBUG=1 e, junto, o `DevAutoLoginMiddleware`, que cria e autentica
+    um SUPERUSUÁRIO para requisição anônima.
+    """
+
+    def _importar_settings(self, **ambiente):
+        import subprocess
+        import sys
+
+        from django.conf import settings as _settings
+
+        env = dict(os.environ)
+        env.pop("FLY_APP_NAME", None)
+        env.update({
+            "DJANGO_SECRET_KEY": "chave-de-teste-suficientemente-longa-para-passar",
+            "PYTHONIOENCODING": "utf-8",
+        })
+        env.update(ambiente)
+        return subprocess.run(
+            [sys.executable, "-c", "import core.settings"],
+            cwd=str(_settings.BASE_DIR),
+            env=env, capture_output=True, text=True,
+        )
+
+    def test_debug_com_app_env_de_producao_nao_sobe(self):
+        for app_env in ("production", "staging"):
+            with self.subTest(app_env=app_env):
+                r = self._importar_settings(DJANGO_DEBUG="1", APP_ENV=app_env)
+                self.assertNotEqual(r.returncode, 0, r.stdout)
+                # Sem acento na asserção: o stderr do subprocesso volta na
+                # codificação do console (cp1252 no Windows) e "está" chega
+                # mojibake, quebrando um teste que na verdade passou.
+                self.assertIn("ImproperlyConfigured", r.stderr)
+                self.assertIn(f"APP_ENV={app_env}", r.stderr)
+
+    def test_desenvolvimento_com_debug_continua_subindo(self):
+        r = self._importar_settings(DJANGO_DEBUG="1", APP_ENV="development")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class LinkPublicoRLSTests(SimpleTestCase):
+    """A única leitura anônima do produto: o link que já foi publicado.
+
+    Sem esta porta, `redirect_curto` responde 404 para TODO link enviado e nenhum
+    clique é registrado — a receita morre em silêncio, e a suíte em SQLite não vê
+    nada porque lá não existe RLS.
+    """
+
+    def test_publicacao_abre_apenas_a_linha_do_identificador_apresentado(self):
+        sql = " ".join(policy_statements("scrapers_publicacao", mixed=False))
+        self.assertIn("app.public_link", sql)
+        self.assertIn("app.public_link_signature", sql)
+        # Assinada pelo mesmo HMAC das outras: um GUC plantado sem a chave não vale.
+        self.assertIn("tenant_security.context_valid", sql)
+        # Só o que já foi publicado, e só a linha cujo identificador veio na URL.
+        self.assertIn("status = 'enviado'", sql)
+        self.assertIn("slug_curto", sql)
+        self.assertIn("id_publico", sql)
+
+    def test_escrita_da_publicacao_continua_exigindo_tenant(self):
+        statements = policy_statements("scrapers_publicacao", mixed=False)
+        for sql in statements:
+            if "FOR SELECT" in sql:
+                continue
+            self.assertNotIn(
+                "app.public_link", sql,
+                "o contexto público não pode liberar escrita em publicação",
+            )
+
+    def test_clique_so_entra_amarrado_a_publicacao_liberada(self):
+        statements = policy_statements("scrapers_cliquepublicacao", mixed=False)
+        insert = next(s for s in statements if "FOR INSERT" in s)
+        select = next(s for s in statements if "FOR SELECT" in s)
+        # O clique nasce da request anônima...
+        self.assertIn("app.public_link", insert)
+        self.assertIn("scrapers_publicacao", insert)
+        self.assertIn("pub.id = publicacao_id", insert)
+        # ...mas lê-lo continua sendo privilégio do dono.
+        self.assertNotIn("app.public_link", select)
+
+
+class ContextoLinkPublicoTests(TestCase):
+    def test_instala_e_derruba_os_gucs_do_link_publico(self):
+        from apps.accounts.tenant import public_link_context
+
+        if connection.vendor != "postgresql":
+            self.skipTest("GUC assinado só existe no PostgreSQL")
+
+        with public_link_context("abc123"):
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT current_setting('app.public_link', true), "
+                    "current_setting('app.public_link_signature', true)"
+                )
+                valor, assinatura = cursor.fetchone()
+        self.assertEqual(valor, "abc123")
+        self.assertEqual(len(assinatura or ""), 64)
+
+        # `local=TRUE` dentro de atomic: com CONN_MAX_AGE=600 a conexão volta para
+        # o pool, e um GUC de sessão sobreviveria para a request de outra pessoa.
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT current_setting('app.public_link', true)")
+            self.assertIn(cursor.fetchone()[0], ("", None))
