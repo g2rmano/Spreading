@@ -916,6 +916,32 @@ class Command(BaseCommand):
                 st.write_state("scrape", fase="aguardando", loja_atual=None,
                                proximo_ciclo=proximo.isoformat(), erro=ERRO_PUBLICO)
 
+    def _faxina_de_orfas(self):
+        """Fecha o que ficou pendurado. Roda com a lane ligada OU desligada.
+
+        Uma publicação nasce `pendente` antes do trabalho; o processo que morre no
+        meio (deploy, crash) não deixa nenhum `except` para marcá-la. Antes isto
+        vivia dentro do tick, ou seja, atrás do portão da lane — e uma órfã criada
+        pelo botão "Enviar agora" com a esteira desligada não tinha coveiro nenhum.
+        Nunca derruba o loop: faxina não vale um tique de envio.
+        """
+        try:
+            from apps.scrapers.maintenance import (
+                reconciliar_execucoes_ingestao_orfas,
+                reconciliar_publicacoes_orfas,
+            )
+            orfas = reconciliar_publicacoes_orfas()
+            if orfas:
+                logger.warning("%s publicacao(oes) orfa(s) fechada(s) como falha", orfas)
+            ingestoes_orfas = reconciliar_execucoes_ingestao_orfas()
+            if ingestoes_orfas:
+                logger.warning(
+                    "%s execução(ões) de ingestão órfã(s) fechada(s)",
+                    ingestoes_orfas,
+                )
+        except Exception as e:
+            logger.warning("Reconciliacao de publicacoes falhou: %s", e)
+
     def _loop_envio(self, opts):
         from django.conf import settings
         from apps.scrapers.ofertas import processar_configs_de_envio
@@ -934,9 +960,27 @@ class Command(BaseCommand):
         proximo = timezone.now()  # vencido: processa assim que ligarem
         falhas_banco = 0
         while True:
+            # A fila e a faxina rodam ANTES do portão da lane, e de propósito.
+            #
+            # A flag "Envios" governa a esteira automática — criar envios novos a
+            # partir das regras. Ela nunca governou o botão "Enviar agora" da tela,
+            # que enfileira do mesmo jeito e responde "reservado". Com a lane
+            # desligada, nada drenava a fila e nada a enterrava: o item ficava
+            # `pendente` para sempre, sem consumidor e sem coveiro. Pior, o
+            # reconciliador de órfãs decide se reagenda perguntando se a fila v2
+            # está ligada para aquela organização — e a resposta era "sim" enquanto
+            # ninguém consumia, então a mesma linha voltava a cada 30 min gravando
+            # um evento novo, sem teto.
+            try:
+                fila = _consumir_fila_v2()
+                if fila:
+                    logger.info("Fila de envio v2: %s lote(s) processado(s)", len(fila))
+            except Exception:
+                logger.exception("Falha ao consumir fila de envio v2")
             if not st.is_enabled("envio"):
                 st.write_state("envio", fase="desligado",
                                ultima_msg="Desligado — ligue na tela Envios.")
+                self._faxina_de_orfas()
                 time.sleep(POLL)
                 continue
             if timezone.now() < proximo:
@@ -946,12 +990,6 @@ class Command(BaseCommand):
                 # Só o timestamp: fase/erro/proximo_ciclo já vêm do fim do tick, e
                 # reescrevê-los aqui apagaria o erro do último ciclo na hora seguinte.
                 st.write_state("envio")
-                try:
-                    fila = _consumir_fila_v2()
-                    if fila:
-                        logger.info("Fila de envio v2: %s lote(s) processado(s)", len(fila))
-                except Exception:
-                    logger.exception("Falha ao consumir fila de envio v2")
                 time.sleep(POLL)
                 continue
             agora = timezone.now()
@@ -961,22 +999,7 @@ class Command(BaseCommand):
                 # Faxina antes do tick: fecha publicações que ficaram 'pendente' porque
                 # o worker morreu no meio de um envio (deploy/crash). Nunca derruba o
                 # tick — envio é o que importa aqui.
-                try:
-                    from apps.scrapers.maintenance import (
-                        reconciliar_execucoes_ingestao_orfas,
-                        reconciliar_publicacoes_orfas,
-                    )
-                    orfas = reconciliar_publicacoes_orfas()
-                    if orfas:
-                        logger.warning("%s publicacao(oes) orfa(s) fechada(s) como falha", orfas)
-                    ingestoes_orfas = reconciliar_execucoes_ingestao_orfas()
-                    if ingestoes_orfas:
-                        logger.warning(
-                            "%s execução(ões) de ingestão órfã(s) fechada(s)",
-                            ingestoes_orfas,
-                        )
-                except Exception as e:
-                    logger.warning("Reconciliacao de publicacoes falhou: %s", e)
+                self._faxina_de_orfas()
                 # Purga do log 1x/dia. Mora neste loop porque é o único ligado o dia
                 # todo em produção; se o envio estiver desligado nada gera evento, então
                 # não purgar também não é problema. Nunca derruba o tick.

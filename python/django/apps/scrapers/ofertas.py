@@ -4075,8 +4075,16 @@ def processar_configs_de_envio():
         vencido = cfg.proximo_envio is None or agora >= cfg.proximo_envio
         if not vencido:
             continue
+        # Conta o enviado E o que está na fila para sair. Sob a fila v2 a
+        # publicação nasce `pendente` e só vira `enviado` minutos depois, então
+        # contar apenas `enviado` deixava o teto por regra sem efeito: o tique
+        # seguinte via o mesmo total de ontem e enfileirava de novo. A cota do dono
+        # (`_cota_estourada`) já contava pendente; esta não.
         enviados_config_hoje = Publicacao.objects.filter(
-            configuracao=cfg, status="enviado", enviada_em__range=_hoje_range).count()
+            Q(status="enviado", enviada_em__range=_hoje_range)
+            | Q(status="pendente", criada_em__range=_hoje_range),
+            configuracao=cfg,
+        ).count()
         if cfg.max_envios_dia and enviados_config_hoje >= cfg.max_envios_dia:
             continue
         # 3. WhatsApp do dono fora do ar: não é falha da regra. Sai sem tocar em

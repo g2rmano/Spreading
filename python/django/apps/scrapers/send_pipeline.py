@@ -238,6 +238,50 @@ def queued_media_b64(publication):
     return base64.b64encode(raw).decode("ascii") if raw else None
 
 
+def _contar_falha_na_regra(publication, classification, reason_code=""):
+    """Devolve a falha terminal para a regra que a originou.
+
+    Sem isto a válvula de segurança não existe no caminho enfileirado. O núcleo só
+    incrementa `falhas_consecutivas` quando o envio termina no mesmo tique; sob a
+    fila v2 o resultado imediato é `sucesso=True, queued=True`, e o desfecho real
+    acontece aqui, minutos depois, longe de qualquer regra. Uma regra com destino
+    inválido re-enfileirava para sempre — `pausar_apos_falhas` e `frear()` nunca
+    eram alcançados.
+
+    Só falha TERMINAL conta. Retry ainda em curso não é veredito, e transitório
+    nunca contou nem no caminho antigo: é o que desligava a automação de quem não
+    tinha defeito nenhum na regra.
+    """
+    del classification  # o estágio já diz o desfecho; a classificação não basta
+    # `uncertain` também é terminal e NÃO é veredito de falha: pode ter chegado ao
+    # grupo. Só os dois desfechos que afirmam fracasso contam.
+    if publication.stage not in {"permanent_failed", "cancelled"}:
+        return
+    configuracao = getattr(publication, "configuracao", None)
+    if configuracao is None:
+        return  # envio manual da tela: não há regra para pausar
+    from apps.scrapers.eventos import log_event
+
+    configuracao.falhas_consecutivas = (configuracao.falhas_consecutivas or 0) + 1
+    campos = ["falhas_consecutivas"]
+    limite = configuracao.pausar_apos_falhas
+    if limite and configuracao.falhas_consecutivas >= limite:
+        # `frear` só preenche os campos; quem grava é quem chama.
+        configuracao.frear(timezone.now(), publication.erro or reason_code)
+        campos = ["falhas_consecutivas", "motivo_pausa", "pausada_ate"]
+        log_event(
+            "publicacao", "config_pausada",
+            f"Automação pausada após {configuracao.falhas_consecutivas} falhas na "
+            f"fila de envio: {configuracao.motivo_pausa}",
+            level="error", usuario=configuracao.owner,
+            contexto={"configuracao": configuracao.id,
+                      "destino": configuracao.grupo_id,
+                      "publicacao_id": publication.pk,
+                      "motivo_tecnico": reason_code},
+        )
+    configuracao.save(update_fields=campos)
+
+
 def _record_pretransport_failure(publications, result):
     """Classifica uma falha ocorrida antes de ``begin_transport`` e agenda retry."""
     classification = classify_result(result)
@@ -294,6 +338,8 @@ def _record_pretransport_failure(publications, result):
                 "attempt_count", "status", "stage", "transport_state",
                 "next_retry_at", "erro",
             ])
+            if current.stage in TERMINALS:
+                _contar_falha_na_regra(current, classification, reason)
             attempt.save(update_fields=["next_retry_at"])
             PublicacaoEvento.objects.create(
                 organization_id=current.organization_id, publicacao=current,

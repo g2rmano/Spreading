@@ -27,6 +27,23 @@ def resolver_token(usuario=None) -> str:
     return (getattr(settings, "TELEGRAM_BOT_TOKEN", "") or "").strip()
 
 
+def _sem_token(texto: str, token: str) -> str:
+    """Tira o token do bot do texto do erro.
+
+    O token vive no CAMINHO da URL (`api.telegram.org/bot<id>:<segredo>/…`), e é
+    exatamente isso que `requests` coloca na mensagem de `ConnectionError`. A
+    redação de log do projeto cobre query-string, `Bearer` e `campo=valor` — não
+    cobre caminho — então o segredo ia inteiro para `EventoOperacional.contexto`
+    e para o Sentry.
+    """
+    limpo = str(texto or "")
+    if token:
+        limpo = limpo.replace(token, "<token>")
+    # Rede de segurança: qualquer `/bot<algo>:<algo>/` que sobre vira máscara,
+    # inclusive de um token que não seja o desta chamada.
+    return re.sub(r"/bot\d+:[A-Za-z0-9_-]+", "/bot<token>", limpo)
+
+
 class TelegramSender(Sender):
     slug = "telegram"
     prefers_image = "url"          # sendPhoto aceita a URL da imagem do ML direto
@@ -97,10 +114,33 @@ class TelegramSender(Sender):
                     "erro": corpo.get("description") or f"HTTP {r.status_code}",
                     "status": codigo, "classe": classe, "via": "telegram",
                     "duracao_ms": round((time.monotonic() - inicio) * 1000)})
-        except (requests.Timeout, requests.ConnectionError) as e:
-            return self._resultado({"sucesso": False, "erro": f"Falha de transporte: {e}",
+        except requests.ConnectTimeout as e:
+            # Nem chegou a conectar: nada saiu, repetir é seguro.
+            return self._resultado({"sucesso": False,
+                    "erro": _sem_token(f"Falha ao conectar: {e}", token),
+                    "classe": "transitorio", "via": "telegram", "etapa": "http",
+                    "duracao_ms": 30000, "falha_infra": True})
+        except requests.Timeout as e:
+            # Estourou ESPERANDO a resposta: o Bot API pode já ter aceitado e
+            # publicado. Marcar transitório fazia `padronizar_resultado` calcular
+            # `repetir=True` e a oferta saía duas vezes no canal — o mesmo buraco
+            # que o caminho do WhatsApp fechou com ledger e chave de idempotência.
+            # Aqui não há ledger para consultar, então o desfecho honesto é
+            # "incerto": não conta como enviado e não repete.
+            return self._resultado({"sucesso": False, "resultado": "incerto",
+                    "repetir": False,
+                    "erro": _sem_token(
+                        f"O envio foi iniciado, mas a confirmação não chegou a "
+                        f"tempo; confira no canal antes de repetir: {e}", token),
+                    "classe": "transitorio", "via": "telegram", "etapa": "http",
+                    "duracao_ms": 30000, "falha_infra": True,
+                    "operacao": str(operation_id or "")})
+        except requests.ConnectionError as e:
+            return self._resultado({"sucesso": False,
+                    "erro": _sem_token(f"Falha de transporte: {e}", token),
                     "classe": "transitorio", "via": "telegram", "etapa": "http",
                     "duracao_ms": 30000, "falha_infra": True})
         except Exception as e:
-            return self._resultado({"sucesso": False, "erro": f"Falha de transporte: {e}",
+            return self._resultado({"sucesso": False,
+                    "erro": _sem_token(f"Falha de transporte: {e}", token),
                     "classe": "desconhecido", "via": "telegram"})

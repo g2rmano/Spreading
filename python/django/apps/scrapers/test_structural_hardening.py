@@ -2705,3 +2705,77 @@ class CouponAudienceAndConfigurationTests(TestCase):
                 grupo_id="grupo@g.us", tipo="aviso_cupons",
                 marketplace="", ativo=True,
             )
+
+
+class ValvulaDeSegurancaDaFilaTests(TestCase):
+    """A regra tem de pausar quando o destino está errado — também na fila v2.
+
+    No caminho síncrono, uma falha permanente incrementa `falhas_consecutivas` e
+    `pausar_apos_falhas` acaba freando a regra. Sob a fila, o resultado imediato é
+    `sucesso=True, queued=True`: nenhum dos ramos que contam falha era alcançado, e
+    o desfecho real acontecia minutos depois, dentro do worker, longe de qualquer
+    regra. Uma regra com destino inválido re-enfileirava para sempre.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("valvula", password="x")
+        self.organization = ensure_personal_organization(self.user)
+        self.config = ConfiguracaoEnvio.objects.create(
+            owner=self.user, organization=self.organization,
+            grupo_id="destino-invalido", pausar_apos_falhas=2,
+        )
+        self.product = Produto.objects.create(
+            marketplace="mercadolivre", nome="Oferta", origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=80,
+            link_produto="https://produto.mercadolivre.com.br/MLB-9-valvula",
+        )
+
+    def _publicacao(self):
+        return Publicacao.objects.create(
+            usuario=self.user, organization=self.organization,
+            configuracao=self.config, origem="produto", produto=self.product,
+            canal="whatsapp", destino_id="destino-invalido",
+        )
+
+    def _falhar(self, publicacao, classe="permanente"):
+        from apps.scrapers.send_pipeline import (
+            _record_pretransport_failure, queue_publications,
+        )
+        queue_publications([publicacao])
+        publicacao.refresh_from_db()
+        _record_pretransport_failure([publicacao], {
+            "sucesso": False, "classe": classe,
+            "motivo": "Destino do WhatsApp inválido.",
+        })
+
+    def test_falha_permanente_conta_para_a_regra(self):
+        self._falhar(self._publicacao())
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.falhas_consecutivas, 1)
+        self.assertIsNone(self.config.pausada_ate)
+
+    def test_ao_bater_o_teto_a_regra_freia(self):
+        for _ in range(2):
+            self._falhar(self._publicacao())
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.falhas_consecutivas, 2)
+        self.assertIsNotNone(self.config.pausada_ate)
+        self.assertIn("inválido", self.config.motivo_pausa)
+
+    def test_falha_transitoria_nao_conta(self):
+        # Era exatamente isto que desligava a automação de quem não tinha defeito
+        # nenhum na regra: worker piscou, 429, timeout.
+        self._falhar(self._publicacao(), classe="transitorio")
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.falhas_consecutivas, 0)
+        self.assertIsNone(self.config.pausada_ate)
+
+    def test_envio_manual_sem_regra_nao_quebra(self):
+        publicacao = Publicacao.objects.create(
+            usuario=self.user, organization=self.organization,
+            origem="produto", produto=self.product, canal="whatsapp",
+            destino_id="destino-invalido",
+        )
+        self._falhar(publicacao)  # configuracao=None: não há regra para pausar
+        publicacao.refresh_from_db()
+        self.assertEqual(publicacao.stage, "permanent_failed")
