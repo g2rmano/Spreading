@@ -17,8 +17,8 @@ from django.utils import timezone
 from apps.accounts.models import ensure_personal_organization
 from apps.scrapers import deals
 from apps.scrapers.models import (
-    ConfiguracaoEnvio, CupomNormalizado, FonteIngestao, PrecoHistorico, Produto,
-    ProdutoCupom,
+    ConfiguracaoEnvio, CupomNormalizado, CupomValidacao, FonteIngestao,
+    PrecoHistorico, Produto, ProdutoCupom,
 )
 from apps.scrapers.precos import chave_produto
 
@@ -60,7 +60,7 @@ class BaseDeals(TestCase):
             )
 
     def _cupom(self, *, produto=None, codigo="PRESENTE", percentual=20.0, teto=100.0,
-               minimo=0.0, primeira=None, sitewide=True):
+               minimo=0.0, primeira=None, sitewide=True, checkout=False):
         """Cupom + a prova de que ele se aplica AO PRODUTO.
 
         Sem `ProdutoCupom` confirmado o cupom não entra mais na conta do preço:
@@ -84,6 +84,14 @@ class BaseDeals(TestCase):
         if produto is not None:
             ProdutoCupom.objects.get_or_create(
                 produto=produto, cupom=cupom, defaults={"status": "confirmado"})
+        if checkout:
+            # `checkout=True` = o abatimento foi OBSERVADO num carrinho real. É a
+            # única prova que autoriza a mensagem a anunciar um total com o cupom
+            # descontado; sem ela o cupom aparece, mas sem conta.
+            CupomValidacao.objects.create(
+                usuario=self.user, cupom=cupom, marketplace="mercadolivre",
+                cart_fingerprint=f"teste-{codigo}", status="approved",
+            )
         return cupom
 
 
@@ -93,7 +101,7 @@ class PrecoFinalCoerenteTests(BaseDeals):
     def test_preco_final_e_vitrine_menos_beneficio(self):
         produto = self._produto(preco=100.0)
         self._observar(produto, 180.0, 175.0, 170.0)
-        self._cupom(produto=produto, percentual=20.0, teto=100.0)
+        self._cupom(produto=produto, percentual=20.0, teto=100.0, checkout=True)
         resultado = deals.gerar_deals(self._config(), limite=5)
         self.assertTrue(resultado)
         deal = resultado[0]
@@ -106,7 +114,7 @@ class PrecoFinalCoerenteTests(BaseDeals):
         produto = self._produto(preco=400.0, de=800.0)
         self._observar(produto, 700.0, 690.0, 680.0)
         # Teto de R$ 60 sobre um item de R$ 400: 50% seriam R$ 200.
-        self._cupom(produto=produto, percentual=50.0, teto=60.0)
+        self._cupom(produto=produto, percentual=50.0, teto=60.0, checkout=True)
         resultado = deals.gerar_deals(self._config(), limite=5)
         deal = resultado[0]
         self.assertEqual(deal.beneficio_rs, 60.0)
@@ -134,7 +142,7 @@ class CupomPereneTests(BaseDeals):
         produto = self._produto(preco=100.0)
         self._observar(produto, *self.SERIE)
         antigo = timezone.now() - timedelta(days=90)
-        self._cupom(produto=produto, percentual=20.0, teto=100.0, primeira=antigo)
+        self._cupom(produto=produto, percentual=20.0, teto=100.0, primeira=antigo, checkout=True)
         resultado = deals.gerar_deals(self._config(), limite=5)
         self.assertTrue(resultado)
         deal = resultado[0]
@@ -146,7 +154,7 @@ class CupomPereneTests(BaseDeals):
     def test_cupom_novo_credita_profundidade(self):
         produto = self._produto(preco=100.0)
         self._observar(produto, *self.SERIE)
-        self._cupom(produto=produto, percentual=20.0, teto=100.0, primeira=timezone.now())
+        self._cupom(produto=produto, percentual=20.0, teto=100.0, primeira=timezone.now(), checkout=True)
         deal = deals.gerar_deals(self._config(), limite=5)[0]
         self.assertFalse(deal.cupom_perene)
         self.assertGreater(deal.componentes["valor_real"], 0.5)
@@ -184,7 +192,7 @@ class NichoTests(BaseDeals):
         """A faixa julga o que o comprador paga, não a vitrine."""
         produto = self._produto(preco=100.0)
         self._observar(produto, 180.0, 175.0, 170.0)
-        self._cupom(produto=produto, percentual=20.0, teto=100.0)   # final = 80
+        self._cupom(produto=produto, percentual=20.0, teto=100.0, checkout=True)   # final = 80
         config = self._config(preco_min=90.0)
         from collections import defaultdict
         rejeicoes = defaultdict(int)
@@ -270,7 +278,7 @@ class RankingIntegradoTests(BaseDeals):
     def _cenario(self):
         produto = self._produto(preco=100.0)
         self._observar(produto, 180.0, 175.0, 170.0)
-        self._cupom(produto=produto, percentual=20.0, teto=100.0)
+        self._cupom(produto=produto, percentual=20.0, teto=100.0, checkout=True)
         return self._config()
 
     @override_settings(DEAL_LAYER_SHADOW=True, DEAL_LAYER_LIVE=False)
@@ -317,7 +325,7 @@ class MensagemDealTests(BaseDeals):
     def _deal(self, **kwargs):
         produto = self._produto(preco=100.0)
         self._observar(produto, 180.0, 175.0, 170.0)
-        self._cupom(produto=produto, percentual=20.0, teto=100.0)
+        self._cupom(produto=produto, percentual=20.0, teto=100.0, checkout=True)
         resultado = deals.gerar_deals(self._config(), limite=1)
         return resultado[0]
 
@@ -483,7 +491,7 @@ class FatosDoDealTests(BaseDeals):
     def _deal_com_minima(self):
         produto = self._produto(preco=100.0)
         self._observar(produto, 180.0, 175.0, 170.0)
-        self._cupom(produto=produto, percentual=20.0, teto=100.0)
+        self._cupom(produto=produto, percentual=20.0, teto=100.0, checkout=True)
         return deals.gerar_deals(self._config(), limite=1)[0]
 
     def test_fatos_liberam_exatamente_os_numeros_da_mensagem(self):
@@ -628,3 +636,57 @@ class PoolReservaFatiaParaCupomTests(BaseDeals):
         # O de preco puro continua no pool, e a fatia de cupom respeita o proprio teto.
         self.assertIn(recente.pk, ids)
         self.assertEqual(len(ids), 3)
+
+
+class CupomSemProvaNaoEntraNaContaTests(BaseDeals):
+    """O caso real de 07/09/2026 — o cooktop.
+
+    A vitrine do Mercado Livre anunciava R$ 578,55 para um cooktop cujo carrinho
+    cobrava R$ 609: a diferença exata de 5%, ou seja, o preço da vitrine JÁ era
+    pós-cupom — e o produto não trazia prova nenhuma disso (`evidencia` só tinha
+    `transport`). Em cima desse preço o sistema abateu um SEGUNDO cupom, o
+    LIBERAESSA, de R$ 46,28, e publicou R$ 532,27. No checkout o LIBERAESSA estava
+    esgotado e o cliente via R$ 609.
+
+    Dois descontos empilhados, nenhum dos dois comprovado. O cupom continua na
+    mensagem — é ele que vende — mas sem virar uma conta que ninguém conferiu.
+    """
+
+    def test_sem_prova_de_checkout_o_preco_nao_muda(self):
+        produto = self._produto(preco=578.55, de=659.0)
+        self._observar(produto, 700.0, 690.0, 680.0)
+        self._cupom(produto=produto, codigo="LIBERAESSA", percentual=8.0, teto=100.0)
+
+        deal = deals.gerar_deals(self._config(), limite=5)[0]
+
+        self.assertTrue(deal.tem_cupom)
+        self.assertEqual(deal.preco_final, 578.55)      # o preço medido, e só ele
+        self.assertEqual(deal.beneficio_publicavel, 0.0)
+        self.assertTrue(deal.coerente())
+
+    def test_com_prova_de_checkout_a_conta_volta(self):
+        produto = self._produto(preco=578.55, de=659.0)
+        self._observar(produto, 700.0, 690.0, 680.0)
+        self._cupom(produto=produto, codigo="LIBERAESSA", percentual=8.0, teto=100.0,
+                    checkout=True)
+
+        deal = deals.gerar_deals(self._config(), limite=5)[0]
+
+        self.assertGreater(deal.beneficio_publicavel, 0.0)
+        self.assertLess(deal.preco_final, 578.55)
+        self.assertTrue(deal.coerente())
+
+    def test_mensagem_sem_prova_nao_anuncia_abatimento(self):
+        from apps.scrapers.ofertas import montar_mensagem_deal
+
+        produto = self._produto(preco=578.55, de=659.0)
+        self._observar(produto, 700.0, 690.0, 680.0)
+        self._cupom(produto=produto, codigo="LIBERAESSA", percentual=8.0, teto=100.0)
+        deal = deals.gerar_deals(self._config(), limite=5)[0]
+
+        texto = montar_mensagem_deal(deal, "https://meli.la/x")
+
+        self.assertIn("LIBERAESSA", texto)          # o cupom continua vendendo
+        self.assertNotIn("abate R$", texto)         # sem conta não comprovada
+        self.assertIn("578,55", texto)              # o número medido
+        self.assertNotIn("532,27", texto)           # o número inventado

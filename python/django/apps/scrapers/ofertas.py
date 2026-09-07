@@ -1485,8 +1485,11 @@ def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None
 
     if deal.tem_cupom:
         codigo = codigo_publicavel(deal.cupom)
-        abate = (f" — abate R$ {_preco_br(deal.beneficio_rs)}"
-                 if deal.beneficio_rs > 0 else "")
+        # Só anuncia quanto o cupom abate quando isso foi provado no checkout. Sem
+        # a prova, o cupom continua na mensagem — ele é o que vende — mas sem uma
+        # conta que ninguém conferiu. Ver `DealCandidate.beneficio_publicavel`.
+        abate = (f" — abate R$ {_preco_br(deal.beneficio_publicavel)}"
+                 if deal.beneficio_publicavel > 0 else " — desconto no checkout")
         if codigo:
             linhas.append(f"🏷 Cupom: {m.bold(esc(codigo))}{abate}")
         else:

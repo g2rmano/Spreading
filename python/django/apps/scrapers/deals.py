@@ -114,9 +114,29 @@ class DealCandidate:
         lista = float(getattr(self.produto, "preco_sem_desconto", 0) or 0)
         return max(0.0, lista - self.preco_final)
 
+    @property
+    def beneficio_publicavel(self) -> float:
+        """Quanto do cupom pode entrar na CONTA que a mensagem anuncia.
+
+        Só o que foi provado no checkout. Sem essa prova o desconto continua
+        valendo para RANQUEAR — um cupom bom é motivo para publicar o item — mas
+        não para afirmar um total.
+
+        O caso que obrigou a separação, em 07/09/2026: a vitrine do Mercado Livre
+        anunciava R$ 578,55 para um cooktop cujo carrinho cobrava R$ 609 — a
+        diferença exata de 5%, ou seja, o preço da vitrine JÁ era pós-cupom, e o
+        produto não trazia prova nenhuma disso (`evidencia` tinha só `transport`).
+        Em cima desse preço o sistema abateu um segundo cupom, o LIBERAESSA, de
+        R$ 46,28, e publicou R$ 532,27. No checkout o cupom estava esgotado e o
+        cliente via R$ 609. Dois descontos empilhados, nenhum comprovado.
+        """
+        return self.beneficio_rs if self.prova == PROVA_CHECKOUT else 0.0
+
     def coerente(self) -> bool:
         """M2: o preço final é sempre vitrine menos benefício. Sem exceção."""
-        return abs((self.preco_vitrine - self.beneficio_rs) - self.preco_final) < 0.005
+        return abs(
+            (self.preco_vitrine - self.beneficio_publicavel) - self.preco_final
+        ) < 0.005
 
 
 def _termos(valor) -> list:
@@ -596,7 +616,12 @@ def gerar_deals(config, limite=8, *, agora=None, incluir_sem_cupom=True,
             prova, beneficio = PROVA_SEM_CUPOM, 0.0
         else:
             cupom, relacao, prova, beneficio = escolha
-        preco_final = round(preco_vitrine - beneficio, 2)
+        # O preço anunciado desconta SÓ o que está provado no checkout. Ver
+        # `DealCandidate.beneficio_publicavel`: sem essa prova, subtrair o cupom é
+        # afirmar um total que ninguém conferiu — e, quando o preço da vitrine já é
+        # pós-cupom, é empilhar dois descontos que não acumulam.
+        beneficio_no_preco = beneficio if prova == PROVA_CHECKOUT else 0.0
+        preco_final = round(preco_vitrine - beneficio_no_preco, 2)
         if preco_min is not None and preco_final < float(preco_min):
             rejeicoes[MOTIVO_FORA_DA_FAIXA] += 1
             continue
