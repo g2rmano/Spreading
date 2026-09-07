@@ -18,8 +18,13 @@ WORKDIR /app
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Copia só os arquivos de dependências primeiro (melhor cache de build)
+# Copia só os arquivos de dependências primeiro (melhor cache de build).
+# `scripts/` vem junto porque o postinstall roda dentro do `npm ci` logo abaixo:
+# ele conserta no whatsapp-web.js o rename `_serialized` -> `$1` do WhatsApp Web,
+# cujas correções upstream continuam abertas. Sem o diretório aqui, o npm ci
+# falharia — que é o comportamento correto, mas atrasado.
 COPY package*.json ./
+COPY scripts/ ./scripts/
 # RemoteAuth não é usado: as sessões ficam em LocalAuth no volume. Omitir suas
 # dependências opcionais remove o caminho de arquivamento vulnerável do artefato
 # executável (archiver/glob/minimatch) sem alterar o runtime usado.

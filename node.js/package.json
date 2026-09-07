@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "sh start-local.sh",
+    "postinstall": "node scripts/patch-wwebjs.js",
     "check": "node --check index.js",
     "test": "npm run check && node --test",
     "audit:production": "npm audit --omit=dev --omit=optional --audit-level=high"
