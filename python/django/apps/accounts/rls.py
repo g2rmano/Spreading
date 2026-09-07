@@ -195,9 +195,18 @@ def policy_statements(
         visible = f"(({system}) OR {ORG_EXPR} OR {PUBLIC_LINK_EXPR})"
         writable = f"(({system}) OR {ORG_EXPR})"
     elif table == "scrapers_cliquepublicacao":
-        # O clique nasce da mesma request anônima; a leitura dele continua sendo
-        # do dono. Só o INSERT ganha a porta, e amarrada à publicação liberada.
-        visible = f"(({system}) OR {ORG_EXPR})"
+        # O clique nasce da mesma request anônima, e a leitura precisa da MESMA
+        # porta — não por escolha de produto, e sim por como o Postgres funciona: o
+        # `create()` do Django emite `INSERT ... RETURNING id`, e `RETURNING` exige
+        # que a linha nova passe também pela policy de SELECT. Sem isto o INSERT
+        # era aceito e o RETURNING recusado, com a mensagem genérica de violação de
+        # RLS — provado em produção em 07/09/2026, onde o mesmo INSERT sem
+        # `RETURNING` passava.
+        #
+        # O alcance continua estreito: a cláusula é a mesma do INSERT, então quem
+        # tem o link enxerga apenas os cliques daquela publicação. A tabela não
+        # guarda IP, cookie nem identificador pessoal (ver `CliquePublicacao`).
+        visible = f"(({system}) OR {ORG_EXPR} OR {CLIQUE_PUBLIC_LINK_EXPR})"
         writable = f"(({system}) OR {ORG_EXPR} OR {CLIQUE_PUBLIC_LINK_EXPR})"
     else:
         # O catálogo compartilhado é quase todo público. Colocá-lo primeiro

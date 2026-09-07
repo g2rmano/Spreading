@@ -938,8 +938,14 @@ class LinkPublicoRLSTests(SimpleTestCase):
         self.assertIn("app.public_link", insert)
         self.assertIn("scrapers_publicacao", insert)
         self.assertIn("pub.id = publicacao_id", insert)
-        # ...mas lê-lo continua sendo privilégio do dono.
-        self.assertNotIn("app.public_link", select)
+        # ...e lê-lo passa pela MESMA porta, porque `INSERT ... RETURNING id` —
+        # que é o que o `create()` do Django emite — exige que a linha nova também
+        # passe pela policy de SELECT. Provado em produção: o mesmo INSERT sem
+        # `RETURNING` passava com a leitura fechada. O alcance é o mesmo do INSERT:
+        # quem tem o link vê os cliques daquela publicação, de uma tabela que não
+        # guarda IP, cookie nem identificador pessoal.
+        self.assertIn("app.public_link", select)
+        self.assertIn("pub.id = publicacao_id", select)
 
 
 class ContextoLinkPublicoTests(TestCase):

@@ -398,7 +398,17 @@ def _responder_clique(publicacao):
     # caso um link corrompido chegue ao banco.
     if not destino.startswith(("https://", "http://")):
         return HttpResponse("Link inválido ou indisponível.", status=404)
-    CliquePublicacao.objects.create(publicacao=publicacao)
+    # O clique é telemetria; o redirect é a receita. Uma falha ao contar não pode
+    # virar 500 para quem clicou — em 07/09/2026 foi exatamente isso que quase
+    # aconteceu, com a policy de INSERT correta e o `RETURNING` do Django barrado
+    # pela de SELECT. O erro é registrado, e a pessoa chega ao produto.
+    try:
+        CliquePublicacao.objects.create(publicacao=publicacao)
+    except Exception:
+        logger.exception(
+            "Falha ao registrar clique da publicação %s; redirecionando mesmo assim",
+            getattr(publicacao, "pk", "?"),
+        )
     response = redirect(destino)
     response["Cache-Control"] = "no-store"
     response["Referrer-Policy"] = "no-referrer"
