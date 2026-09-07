@@ -122,28 +122,44 @@ _PT_MACRO = [
     ("Celulares, Telefonia e Wearables", ["celular", "smartphone", "iphone", "galaxy", "moto g", "xiaomi", "redmi", "smartwatch", "smart watch", "fone bluetooth", "chip ", "capa de celular", "capinha", "pelicula"]),
     ("Eletrônicos e Informática", ["notebook", "laptop", "computador", "pc gamer", "monitor", "teclado", "mouse", "ssd", "hd ", "pen drive", "pendrive", "placa de video", "placa mae", "processador", "memoria ram", "roteador", "impressora", "tablet", "webcam", "cooler", "gabinete"]),
     ("Áudio, Vídeo e Fotografia", ["smart tv", " tv ", "televisor", "caixa de som", "soundbar", "fone de ouvido", "headset", "headphone", "microfone", "camera", "câmera", "drone", "projetor", "echo dot", "alexa"]),
-    ("Eletrodomésticos", ["geladeira", "refrigerador", "fogao", "fogão", "microondas", "micro-ondas", "lava roupas", "lavadora", "secadora", "air fryer", "fritadeira", "liquidificador", "batedeira", "cafeteira", "aspirador", "ventilador", "ar condicionado", "climatizador", "purificador", "forno eletrico"]),
-    ("Cozinha, Mesa e Bar", ["panela", "frigideira", "talher", "faqueiro", "copo", "taca", "taça", "jogo de pratos", "garrafa termica", "potes", "assadeira"]),
-    ("Casa, Móveis e Decoração", ["sofa", "sofá", "cama", "colchao", "colchão", "guarda roupa", "guarda-roupa", "mesa", "cadeira", "estante", "armario", "armário", "cortina", "tapete", "luminaria", "luminária", "rack", "criado mudo", "escrivaninha", "lencol", "lençol", "edredom", "travesseiro", "toalha"]),
-    ("Beleza e Cuidados Pessoais", ["perfume", "maquiagem", "batom", "shampoo", "condicionador", "creme facial", "hidratante", "secador de cabelo", "chapinha", "barbeador", "depilador", "esmalte", "protetor solar", "skincare"]),
+    ("Eletrodomésticos", ["geladeira", "refrigerador", "fogao", "fogão", "microondas", "micro-ondas", "lava roupas", "lava louças", "lava loucas", "lava-louças", "lavadora", "secadora", "cooktop", "coifa", "depurador", "air fryer", "fritadeira", "liquidificador", "batedeira", "cafeteira", "aspirador", "ventilador", "ar condicionado", "climatizador", "purificador", "forno eletrico"]),
+    ("Cozinha, Mesa e Bar", ["panela", "frigideira", "talher", "faqueiro", "copo", "taca", "taça", "jogo de pratos", "garrafa termica", "potes", "assadeira", "cafeteira italiana", "tabua de corte", "escorredor"]),
+    ("Casa, Móveis e Decoração", ["sofa", "sofá", "cama", "colchao", "colchão", "guarda roupa", "guarda-roupa", "mesa", "cadeira", "estante", "armario", "armário", "cortina", "tapete", "luminaria", "luminária", "rack", "criado mudo", "escrivaninha", "lencol", "lençol", "edredom", "travesseiro", "toalha", "colcha", "cobre leito", "cobre-leito", "lixeira", "organizador", "cabide", "varal"]),
+    ("Beleza e Cuidados Pessoais", ["perfume", "eau de parfum", "eau de toilette", "eau de cologne", "edp ", "edt ", "deo parfum", "deo colonia", "colonia ", "body splash", "desodorante", "maquiagem", "blush", "batom", "shampoo", "condicionador", "creme facial", "hidratante", "secador de cabelo", "chapinha", "barbeador", "depilador", "esmalte", "protetor solar", "skincare"]),
     ("Moda, Calçados e Acessórios", ["tenis", "tênis", "sapato", "sandalia", "sandália", "chinelo", "camiseta", "camisa", "calca", "calça", "vestido", "blusa", "jaqueta", "bermuda", "short", "bone", "boné", "oculos", "óculos", "relogio", "relógio", "bolsa", "mochila", "carteira", "cinto", "meia"]),
     ("Esportes e Fitness", ["bicicleta", "halter", "anilha", "esteira", "academia", "musculacao", "musculação", "whey", "creatina", "suplemento", "barra fixa", "corda de pular", "bola ", "patins", "skate", "caneleira"]),
     ("Games, Brinquedos e Hobbies", ["playstation", "ps5", "ps4", "xbox", "nintendo", "controle ", "joystick", "jogo ", "brinquedo", "boneca", "lego", "quebra cabeca", "carrinho de brinquedo", "pelucia", "pelúcia"]),
-    ("Ferramentas e Manutenção", ["furadeira", "parafusadeira", "serra ", "chave de fenda", "kit ferramentas", "esmerilhadeira", "lixadeira", "soldador", "trena", "alicate", "martelo", "compressor"]),
+    ("Ferramentas e Manutenção", ["furadeira", "parafusadeira", "serra ", "chave de fenda", "kit ferramentas", "esmerilhadeira", "lixadeira", "soldador", "trena", "alicate", "martelo", "compressor", "plaina", "tomada", "extensao 5", "interruptor", "cabo pp", "disjuntor", "fita isolante"]),
     ("Automotivo", ["pneu", "oleo motor", "óleo motor", "bateria automotiva", "farol", "retrovisor", "limpador para-brisa", "som automotivo", "capa banco", "tapete carro", "terminal direcao", "terminal direção", "amortecedor", "pastilha de freio", "moto ", "capacete"]),
     ("Pets e Animais", ["racao", "ração", "petisco", "coleira", "aquario", "aquário", "arranhador", "casinha cachorro", "comedouro", "areia gato"]),
     ("Bebês e Maternidade", ["fralda", "carrinho de bebe", "carrinho de bebê", "bercco", "berço", "mamadeira", "chupeta", "cadeira para auto", "body bebe"]),
     ("Alimentos e Bebidas", ["cafe ", "café ", "chocolate", "whisky", "vinho", "cerveja", "azeite", "biscoito", "achocolatado", "leite ", "energetico", "energético"]),
-    ("Saúde, Ortopedia e Equipamentos Médicos", ["termometro", "termômetro", "oximetro", "medidor de pressao", "massageador", "cadeira de rodas", "fralda geriatrica", "vitamina", "colageno", "colágeno"]),
+    ("Saúde, Ortopedia e Equipamentos Médicos", ["termometro", "termômetro", "oximetro", "medidor de pressao", "massageador", "cadeira de rodas", "fralda geriatrica", "vitamina", "colageno", "colágeno", "capsulas", "cápsulas", "caps)", "colagen"]),
     ("Papelaria, Escritório e Escola", ["caderno", "caneta", "mochila escolar", "estojo", "lapis", "lápis", "papel sulfite", "agenda"]),
 ]
 
 
+def _sem_acento(texto: str) -> str:
+    """Minúsculas e sem acento, dos DOIS lados da comparação.
+
+    A lista mistura termos com e sem acento ("garrafa termica" convivendo com
+    "câmera"), e a comparação era literal — então "Garrafa Térmica Stanley", que é
+    exatamente o que o Mercado Livre escreve, não casava com "garrafa termica" e
+    o produto ficava sem macro. Sem macro ele não chega a nenhum grupo de nicho:
+    some do funil sem erro nenhum. Normalizar os dois lados resolve a família
+    inteira de uma vez, em vez de duplicar cada palavra na lista.
+    """
+    import unicodedata
+
+    decomposto = unicodedata.normalize("NFKD", str(texto or "").lower())
+    return "".join(c for c in decomposto if not unicodedata.combining(c))
+
+
 def classificar_oferta_por_nome(nome: str):
     """Mapeia o nome (PT) da oferta para uma macro-categoria. None se não bater."""
-    n = (nome or "").lower()
+    n = _sem_acento(nome)
     for macro, kws in _PT_MACRO:
-        if any(k in n for k in kws):
+        if any(_sem_acento(k) in n for k in kws):
             return macro
     return None
 

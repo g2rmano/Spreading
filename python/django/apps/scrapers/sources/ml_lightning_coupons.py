@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import logging
 import time
 from collections import defaultdict
 from datetime import timedelta
@@ -23,6 +24,8 @@ from apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper import _payload_no
 
 from .base import IngestedItem, SourceAdapter, normalizar_dinheiro
 
+
+logger = logging.getLogger(__name__)
 
 COUPONS_URL = "https://www.mercadolivre.com.br/ofertas/cupons"
 _TIMEOUT = (5, 20)
@@ -224,6 +227,24 @@ class MLLightningCouponsSource(SourceAdapter):
         response = requests.get(
             COUPONS_URL, timeout=_TIMEOUT, headers={"User-Agent": _UA},
         )
+        if response.status_code in (401, 403, 429):
+            # A partir de 07/09/2026 este endereço entrou no muro que já pegava a
+            # PDP e `lista.*`. Levantar aqui despejava um traceback por ciclo — a
+            # cada 5 min pela lane rápida e a cada 15 pela de cupons — para um fato
+            # que não é defeito nosso e que a fonte já sabe reportar. Bloqueio é
+            # estado da fonte, não exceção: o catálogo anterior é preservado pelo
+            # anti-wipe e a Saúde mostra a fonte degradada.
+            self.last_health_status = "blocked"
+            self.last_metrics = {
+                "duration_ms": round((time.monotonic() - started) * 1000),
+                "pages_processed": 0,
+                "http_status": response.status_code,
+            }
+            logger.info(
+                "Cupons relâmpago do ML bloqueados (HTTP %s); catálogo anterior "
+                "preservado.", response.status_code,
+            )
+            return
         response.raise_for_status()
         payload = _payload_nordic(response.text)
         rows, self.last_metrics, self.last_health_status = extract_lightning_coupons(
