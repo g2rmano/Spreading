@@ -963,6 +963,21 @@ const purgeAuthDirPorId = (instanceId, organizationId, reason) => {
 };
 const markPaired = (session) => authStore.markPaired(authRootPath, session.authPath);
 const clearPaired = (session) => authStore.clearPaired(authRootPath, session.authPath);
+const markRefused = (session, motivo) => authStore.markRefused(
+    authRootPath, session.authPath, motivo,
+);
+const clearRefused = (session) => authStore.clearRefused(authRootPath, session.authPath);
+// Carencia depois de o WhatsApp recusar a credencial guardada. Nao e castigo: e o
+// que impede uma sessao morta de tomar a unica vaga a cada reconcile do Django e
+// deixar de fora a sessao que esta entregando mensagem. Uma pessoa pedindo
+// explicitamente (POST /api/sessoes, reset) ignora a carencia.
+const CARENCIA_CREDENCIAL_RECUSADA_MS = parseInt(
+    process.env.WA_REFUSED_COOLDOWN_MS, 10,
+) || 1800000;
+const credencialEmCarencia = (instanceId) => {
+    const idade = authStore.refusedAgeMs(authRootPath, authPathDe(instanceId));
+    return idade !== null && idade < CARENCIA_CREDENCIAL_RECUSADA_MS;
+};
 const hasStoredAuth = (instanceId) => authStore.hasStoredAuth(authRootPath, authPathDe(instanceId));
 
 const withTimeout = (promise, timeoutMs, label) => {
@@ -1853,6 +1868,13 @@ const initializeSession = (session) => {
             });
             return;
         }
+        if (hasStoredAuth(session.id)) {
+            // Chegar ao QR com credencial no volume significa que o WhatsApp a
+            // recusou. Registrar aqui é o que dá carência ao restore automático;
+            // sem isso o Django reconcilia, esta sessão toma a vaga, cai no QR de
+            // novo e o ciclo recomeça — com a sessão que envia esperando fora.
+            markRefused(session, 'restore terminou em QR');
+        }
         scheduleQrIdleDestroy(session);
         // QR é uma credencial temporária. Ele existe somente no payload privado
         // da UI e nunca é impresso, mesmo se um env legado pedir o contrário.
@@ -1947,6 +1969,8 @@ const initializeSession = (session) => {
         session.reconnectAttempts = 0;
         session.authPurges = 0; // ciclo de recuperacao fechado com sucesso
         markPaired(session);    // rede de seguranca: 'authenticated' pode nao vir num restore
+        // Conectou: a credencial nao esta mais recusada, e a carencia some junto.
+        clearRefused(session);
         session.whatsappId = client.info?.wid?._serialized || null;
         await encerrarSessoesDuplicadas(session);
         limparQr(session);
@@ -2991,6 +3015,21 @@ app.post('/api/sessoes/reconcile',
     // O boot nunca restaura um Chromium apenas porque encontrou um diretório no
     // volume. Esta capability foi emitida a partir da WhatsAppConnection vigente
     // no Django e é a prova de registry exigida antes de consumir capacidade.
+    // Carência depois de uma recusa: o reconcile do Django roda a cada tick, e sem
+    // esta porta uma credencial morta reentra na fila para sempre, tomando a vaga
+    // única e empurrando para fora a sessão que está entregando mensagem. Quem
+    // abre a tela e pede de novo (POST /api/sessoes) continua passando na hora.
+    if (binding.ok && !session && credencialEmCarencia(instanceId)) {
+        return res.status(200).json({
+            sucesso: true,
+            instancia: instanceId,
+            consistencia: binding.status,
+            runtime: 'credencial_recusada',
+            motivo: 'A credencial guardada foi recusada; aguardando a carência antes de tentar de novo.',
+            capacidade: { usadas: sessoesOcupandoSlot(), maximas: MAX_WHATSAPP_SESSIONS },
+            worker: process.env.FLY_MACHINE_ID || process.env.HOSTNAME || 'local',
+        });
+    }
     if (binding.ok && !session) {
         const authPath = authPathDe(instanceId);
         const action = decidirRestauracao({
@@ -3034,6 +3073,10 @@ app.get('/api/envios/status/:operation',
 app.post('/api/sessoes',
     capabilityAuth('provision', resolveInstanceId, { singleUse: true }), (req, res) => {
     const instanceId = sanitizeInstanceId(req.body?.instance || req.body?.session || req.body?.userId);
+    // Pedido explícito de uma pessoa: a carência da credencial recusada existe
+    // contra o reconcile automático, não contra quem está olhando a tela e
+    // mandou tentar de novo.
+    authStore.clearRefused(authRootPath, authPathDe(instanceId));
     const session = ensureSession(instanceId, req.capability.organization_id);
     // Pedido explicito do usuario (abrir a aba WhatsApp) e o unico caminho que
     // tira uma sessao de uma fase terminal.

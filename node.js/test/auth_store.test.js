@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 const {
     hasStoredAuth, markPaired, clearPaired, purgeAuthDir,
+    markRefused, clearRefused, refusedAgeMs,
 } = require('../auth_store');
 
 const comRaizTemp = (fn) => {
@@ -99,5 +100,48 @@ test('purge never escapes the auth root', () => {
         } finally {
             fs.rmSync(vitima, { recursive: true, force: true });
         }
+    });
+});
+
+test('credencial nunca recusada nao tem idade de recusa', () => {
+    comRaizTemp((raiz) => {
+        const authPath = path.join(raiz, 'u1');
+        fs.mkdirSync(authPath, { recursive: true });
+        assert.equal(refusedAgeMs(raiz, authPath), null);
+    });
+});
+
+test('a recusa envelhece e some quando a sessao conecta', () => {
+    // A carencia existe porque uma credencial morta reentrava na fila a cada
+    // reconcile do Django, tomava a unica vaga de Chromium, caia em QR e era
+    // coletada — em ciclo, com a sessao que envia esperando de fora.
+    comRaizTemp((raiz) => {
+        const authPath = path.join(raiz, 'u1');
+        assert.equal(markRefused(raiz, authPath, 'restore terminou em QR'), true);
+
+        const agora = Date.now();
+        assert.equal(refusedAgeMs(raiz, authPath, agora) < 1000, true);
+        assert.equal(refusedAgeMs(raiz, authPath, agora + 600000) >= 600000, true);
+
+        assert.equal(clearRefused(raiz, authPath), true);
+        assert.equal(refusedAgeMs(raiz, authPath), null);
+    });
+});
+
+test('marca ilegivel vale a carencia inteira, nao zero', () => {
+    // Ignorar uma marca corrompida devolveria exatamente o ciclo que ela corta.
+    comRaizTemp((raiz) => {
+        const authPath = path.join(raiz, 'u1');
+        fs.mkdirSync(authPath, { recursive: true });
+        fs.writeFileSync(path.join(authPath, '.credencial-recusada'), 'nao e json');
+        assert.equal(refusedAgeMs(raiz, authPath), 0);
+    });
+});
+
+test('limpar recusa inexistente e idempotente', () => {
+    comRaizTemp((raiz) => {
+        const authPath = path.join(raiz, 'u1');
+        fs.mkdirSync(authPath, { recursive: true });
+        assert.equal(clearRefused(raiz, authPath), true);
     });
 });

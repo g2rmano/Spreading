@@ -19,6 +19,12 @@ const path = require('path');
 // evento `authenticated` e some junto com o diretorio no purge.
 
 const PAIRED_MARKER = '.paired';
+// Credencial que existia no volume mas o WhatsApp recusou: o restore terminou em
+// QR em vez de conectar. Guarda o instante para dar carencia antes de tentar de
+// novo — sem isso a sessao morta volta a cada reconcile do Django, toma a unica
+// vaga de Chromium, cai em QR, e o coletor a mata 3min depois, para o ciclo
+// recomecar. Enquanto isso a sessao que de fato envia fica de fora.
+const REFUSED_MARKER = '.credencial-recusada';
 
 // Sinal legado, para sessoes ja pareadas antes de o marcador existir: o
 // IndexedDB do web.whatsapp.com so aparece depois que a pagina persistiu dados.
@@ -75,6 +81,56 @@ const clearPaired = (authRootPath, authPath) => {
     }
 };
 
+// Marca (ou remarca) a credencial como recusada agora.
+const markRefused = (authRootPath, authPath, reason = '') => {
+    if (!dentroDaRaiz(authRootPath, authPath)) return false;
+    try {
+        fs.mkdirSync(authPath, { recursive: true });
+        fs.writeFileSync(path.join(authPath, REFUSED_MARKER), JSON.stringify({
+            em: new Date().toISOString(), motivo: String(reason || ''),
+        }));
+        return true;
+    } catch (err) {
+        console.error(`Falha ao marcar credencial recusada em ${authPath}:`, err.message);
+        return false;
+    }
+};
+
+// Apaga a marca. Chamado quando a sessao conecta de verdade e quando uma pessoa
+// pede explicitamente para tentar de novo — a carencia vale para o automatico,
+// nunca para quem esta olhando a tela.
+const clearRefused = (authRootPath, authPath) => {
+    if (!dentroDaRaiz(authRootPath, authPath)) return false;
+    try {
+        fs.unlinkSync(path.join(authPath, REFUSED_MARKER));
+        return true;
+    } catch (err) {
+        if (err.code === 'ENOENT') return true;
+        console.error(`Falha ao limpar credencial recusada em ${authPath}:`, err.message);
+        return false;
+    }
+};
+
+// ms desde a recusa, ou null se nunca foi recusada (ou a marca esta ilegivel).
+const refusedAgeMs = (authRootPath, authPath, agora = Date.now()) => {
+    if (!dentroDaRaiz(authRootPath, authPath)) return null;
+    let bruto;
+    try {
+        bruto = fs.readFileSync(path.join(authPath, REFUSED_MARKER), 'utf8');
+    } catch (err) {
+        return null; // ENOENT e o caso normal: nunca foi recusada
+    }
+    let em;
+    try {
+        em = Date.parse(JSON.parse(bruto).em);
+    } catch (err) {
+        em = NaN;
+    }
+    // Marca ilegivel conta como recusa agora mesmo: a carencia inteira e melhor
+    // que ignorar a marca e voltar ao ciclo que ela existe para cortar.
+    return Number.isFinite(em) ? Math.max(0, agora - em) : 0;
+};
+
 // Apaga o perfil LocalAuth inteiro (credencial + marcador). Idempotente.
 const purgeAuthDir = (authRootPath, authPath, reason) => {
     if (!dentroDaRaiz(authRootPath, authPath)) {
@@ -91,4 +147,8 @@ const purgeAuthDir = (authRootPath, authPath, reason) => {
     }
 };
 
-module.exports = { hasStoredAuth, markPaired, clearPaired, purgeAuthDir, PAIRED_MARKER };
+module.exports = {
+    hasStoredAuth, markPaired, clearPaired, purgeAuthDir,
+    markRefused, clearRefused, refusedAgeMs,
+    PAIRED_MARKER, REFUSED_MARKER,
+};
