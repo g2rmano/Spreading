@@ -10,6 +10,7 @@ import hashlib
 import html
 import json
 import logging
+import os
 import re
 import time
 from collections import defaultdict, deque
@@ -57,6 +58,59 @@ PREPARO_LOTE_POR_CICLO = 12
 # 400/ciclo ≈ 1600/h de catch-up. Um GET de container custa ~1s e não disputa o
 # Chromium. O lote Playwright continua em PREPARO_LOTE_POR_CICLO (12).
 PREPARO_LOTE_HTTP_POR_CICLO = 400
+# Disjuntor do transporte do container. Cada cupom já tem backoff próprio de 20
+# min, mas isso é POR CUPOM: com 400 cupons por ciclo e o host respondendo 403 a
+# todos, o backoff individual não impede o lote seguinte de repetir a rodada
+# inteira. Medido em 06/09/2026: ~1.600 requisições por hora, todas recusadas,
+# afogando o log e gastando a janela de preparo sem produzir um único vínculo.
+#
+# Depois de N falhas SEGUIDAS de transporte, o passo HTTP para por um tempo e
+# devolve os cupons à fila sem tocar na rede. Uma única resposta boa reabre.
+CONTAINER_FALHAS_ATE_ABRIR = int(
+    os.getenv("CONTAINER_FALHAS_ATE_ABRIR", "8") or "8")
+CONTAINER_CIRCUITO_S = int(os.getenv("CONTAINER_CIRCUITO_S", "900") or "900")
+_CIRCUITO_KEY = "container-ml:circuito"
+_FALHAS_KEY = "container-ml:falhas-seguidas"
+
+
+def _cache_circuito():
+    """Cache persistente: o disjuntor não pode zerar a cada deploy."""
+    from django.core.cache import caches
+
+    return caches["persistente"]
+
+
+def _circuito_aberto() -> bool:
+    try:
+        return bool(_cache_circuito().get(_CIRCUITO_KEY))
+    except Exception:
+        return False  # sem cache, o comportamento é o de antes
+
+
+def _registrar_falha_de_transporte():
+    """Conta a falha e abre o disjuntor quando a sequência estoura o teto."""
+    try:
+        cache = _cache_circuito()
+        falhas = int(cache.get(_FALHAS_KEY) or 0) + 1
+        cache.set(_FALHAS_KEY, falhas, timeout=CONTAINER_CIRCUITO_S)
+        if falhas >= CONTAINER_FALHAS_ATE_ABRIR:
+            cache.set(_CIRCUITO_KEY, True, timeout=CONTAINER_CIRCUITO_S)
+            cache.delete(_FALHAS_KEY)
+            logger.warning(
+                "Container ML: %s falhas seguidas de transporte; pausando o passo "
+                "HTTP por %ss.", falhas, CONTAINER_CIRCUITO_S,
+            )
+    except Exception:
+        logger.exception("Falha ao contabilizar o disjuntor do container")
+
+
+def _registrar_sucesso_de_transporte():
+    try:
+        cache = _cache_circuito()
+        cache.delete(_FALHAS_KEY)
+        cache.delete(_CIRCUITO_KEY)
+    except Exception:
+        pass
 _CENT = Decimal("0.01")
 
 # Mensagem estável do preparo bloqueado por sessão. É ela que a projeção lê para
@@ -567,6 +621,10 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
 
     def _tentar_http(credencial):
         """(linhas, barrado, falha_transporte, inexistente)."""
+        if _circuito_aberto():
+            # Sem tocar na rede: o host recusou a sequência inteira há pouco. O
+            # cupom volta para a fila como falha de transporte, que é o que ele é.
+            return None, False, True, False
         try:
             response = _ml_http_session(credencial).get(link, timeout=8)
             if parede_de_login(response):
@@ -579,9 +637,11 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
                 # cada 20 min, para sempre, e ainda pedindo reconexão ao usuário.
                 return [], False, False, True
             response.raise_for_status()
+            _registrar_sucesso_de_transporte()
             return _produtos_ml_do_html(response.text, limite=9), False, False, False
         except Exception as exc:
             logger.info("Container ML via HTTP falhou para %s: %s", cupom.pk, exc)
+            _registrar_falha_de_transporte()
             return None, False, True, False
 
     # Percorre os candidatos até um passar pelo gateway. Uma sessão de OUTRA
