@@ -176,6 +176,21 @@ DEAL_FRESCOR_MAXIMO_MIN = int(os.getenv("DEAL_FRESCOR_MAXIMO_MIN", "90"))
 # card do item. É a única porta que este IP tem aberta no ML; cada página custa
 # um carregamento, então o teto existe para o envio não virar raspagem.
 PRECO_JIT_PAGINAS_OFERTAS = int(os.getenv("PRECO_JIT_PAGINAS_OFERTAS", "4"))
+# Ritmo do número de WhatsApp. A detecção de automação é heurística e o sinal mais
+# forte é cadência: rajada do mesmo número em poucos segundos. O jitter por regra
+# (`ConfiguracaoEnvio.agendar_proximo`) deixa cada regra irregular, mas dez regras
+# vencendo no mesmo tique disparavam em sequência — que é o padrão de robô.
+#
+# A orientação pública para número não aquecido fica abaixo de 30 mensagens por
+# hora; 20 é conservador. O teto por tique existe para o pico de oferta relâmpago
+# não virar rajada: com tique de 5 min, dois por tique já dão 24/hora de teoria,
+# e o teto horário segura o resto.
+WHATSAPP_ENVIOS_POR_TICK = int(os.getenv("WHATSAPP_ENVIOS_POR_TICK", "2"))
+WHATSAPP_ENVIOS_POR_HORA = int(os.getenv("WHATSAPP_ENVIOS_POR_HORA", "20"))
+# Espaçamento entre dois envios do mesmo número dentro de um tique, com variação
+# aleatória: intervalo constante é tão denunciável quanto a rajada.
+WHATSAPP_ESPACO_MIN_S = int(os.getenv("WHATSAPP_ESPACO_MIN_S", "20"))
+WHATSAPP_ESPACO_MAX_S = int(os.getenv("WHATSAPP_ESPACO_MAX_S", "60"))
 # Shadow calcula o vencedor da camada Deal e registra a divergência SEM trocar o
 # envio. Live é o que troca, e nasce desligado: o rollback é apagar a flag, não
 # reverter migração.

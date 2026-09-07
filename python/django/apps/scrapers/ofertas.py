@@ -4053,6 +4053,58 @@ def processar_configs_de_envio():
         limite = perfil.cota_max_envios_dia() if perfil else 0
         return bool(limite) and _envios_hoje[owner.id] >= limite
 
+    # ── Ritmo do número de WhatsApp ────────────────────────────────────
+    #
+    # A detecção de automação do WhatsApp é heurística, e o sinal mais forte é
+    # cadência: rajada de mensagens do mesmo número em poucos segundos. O jitter
+    # de `agendar_proximo` deixa CADA regra irregular, mas não impede que dez
+    # regras vençam no mesmo tique e disparem em sequência — que é exatamente o
+    # padrão de robô. A recomendação pública para número não aquecido fica abaixo
+    # de 30 mensagens por hora; aqui o teto é conservador e o espaçamento tem
+    # variação aleatória.
+    #
+    # Vale só para WhatsApp: Telegram é API oficial, sem risco de banimento.
+    _por_tick = max(1, int(getattr(settings, "WHATSAPP_ENVIOS_POR_TICK", 2)))
+    _por_hora = max(1, int(getattr(settings, "WHATSAPP_ENVIOS_POR_HORA", 20)))
+    _espaco_min = int(getattr(settings, "WHATSAPP_ESPACO_MIN_S", 20))
+    _espaco_max = max(_espaco_min, int(getattr(settings, "WHATSAPP_ESPACO_MAX_S", 60)))
+    _enviados_no_tick = {}
+    _uma_hora_atras = agora - timedelta(hours=1)
+
+    def _ritmo_estourado(cfg) -> bool:
+        if getattr(cfg, "canal", "whatsapp") != "whatsapp" or cfg.owner_id is None:
+            return False
+        if _enviados_no_tick.get(cfg.owner_id, 0) >= _por_tick:
+            logger.info(
+                "Config %s adiada: já saíram %s envio(s) deste número neste tique.",
+                cfg.id, _enviados_no_tick[cfg.owner_id],
+            )
+            return True
+        na_hora = Publicacao.objects.filter(
+            usuario_id=cfg.owner_id, canal="whatsapp",
+            criada_em__gte=_uma_hora_atras,
+            status__in=("pendente", "enviado", "incerto"),
+        ).count()
+        if na_hora >= _por_hora:
+            logger.info(
+                "Config %s adiada: %s envio(s) na última hora neste número (teto %s).",
+                cfg.id, na_hora, _por_hora,
+            )
+            return True
+        return False
+
+    def _espacar(cfg):
+        """Pausa com variação antes do segundo envio do mesmo número no tique."""
+        if getattr(cfg, "canal", "whatsapp") != "whatsapp" or cfg.owner_id is None:
+            return
+        if not _enviados_no_tick.get(cfg.owner_id):
+            return
+        import time
+
+        pausa = random.randint(_espaco_min, _espaco_max)
+        logger.info("Espaçando %ss antes do próximo envio do número.", pausa)
+        time.sleep(pausa)
+
     for cfg in ConfiguracaoEnvio.objects.filter(ativo=True).select_related("owner__perfil"):
         # 0. Dono suspenso ou cota diária estourada → nunca envia.
         if _cota_estourada(cfg.owner):
@@ -4094,6 +4146,11 @@ def processar_configs_de_envio():
             logger.info(
                 "Config %s pulada: WhatsApp do dono não está conectado.", cfg.id)
             continue
+        # Ritmo: adia sem reagendar. A regra continua vencida e sai no próximo
+        # tique, que é justamente o espaçamento que se quer.
+        if _ritmo_estourado(cfg):
+            continue
+        _espacar(cfg)
 
         # CERCA DE TENANT. Este laço percorre as regras de TODOS os donos, então
         # uma exceção que escape daqui não atrasa um envio: cancela o ciclo inteiro
@@ -4150,6 +4207,8 @@ def processar_configs_de_envio():
         cfg.agendar_proximo(agora)
         if r.get("sucesso") and not r.get("queued"):
             cfg.ultimo_envio = agora
+            if cfg.owner_id is not None:
+                _enviados_no_tick[cfg.owner_id] = _enviados_no_tick.get(cfg.owner_id, 0) + 1
             cfg.falhas_consecutivas = 0
             cfg.motivo_pausa = ""
             cfg.pausada_ate = None
