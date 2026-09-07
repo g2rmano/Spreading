@@ -26,9 +26,15 @@ from apps.scrapers import automacao_state as st
 
 logger = logging.getLogger(__name__)
 
-# Só as esteiras que rodam NESTE process group. `relatorios` mora com o gunicorn
-# (monta o volume /data), então cobrá-la aqui daria vermelho permanente.
-ESTEIRAS = ("scrape", "envio", "links")
+# Todas as esteiras que gravam heartbeat NESTE process group. `relatorios` fica de
+# fora porque mora com o gunicorn (monta o volume /data) e cobrá-la aqui daria
+# vermelho permanente.
+#
+# Começou com três e o Procfile roda oito processos: `cupons` e `scrapeflash`
+# podiam estar mortas com o check verde — e são elas que alimentam o catálogo.
+# `canais` entrou junto com o batimento que ela nunca teve: é a lane que PUBLICA
+# em grupo, e era a única invisível das duas telas.
+ESTEIRAS = ("scrape", "scrape_rapido", "cupons", "envio", "links", "monitor", "canais")
 
 
 def _diagnostico() -> tuple[bool, dict]:

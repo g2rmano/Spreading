@@ -16,7 +16,34 @@ from django.conf import settings
 from django.core.management.base import BaseCommand
 from apps.accounts.tenant import system_job
 
+from apps.scrapers import automacao_state as st
+
 logger = logging.getLogger(__name__)
+
+# Esta lane PUBLICA em grupo e, até agora, não gravava batimento nenhum: não
+# aparecia na tela de Saúde nem no check das esteiras. A única lane que fala com o
+# mundo lá fora era também a única invisível.
+JOB = "canais"
+
+# Menor que o HEARTBEAT_STALE de 90s: um batimento a cada 300s apareceria morto
+# entre uma escrita e outra.
+_INTERVALO_OCIOSO = 30
+
+
+def _dormir_batendo(segundos: int):
+    """Dorme em fatias, renovando o batimento — o `--tick` pode passar de 90s.
+
+    As outras lanes têm POLL curto e batem naturalmente. Esta espera o tick
+    inteiro entre varreduras; dormir de uma vez faria o check acusar morte de um
+    worker perfeitamente vivo.
+    """
+    restante = max(0, int(segundos))
+    while restante > 0:
+        fatia = min(_INTERVALO_OCIOSO, restante)
+        time.sleep(fatia)
+        restante -= fatia
+        if restante > 0:
+            st.write_state(JOB, fase="aguardando")
 
 
 class Command(BaseCommand):
@@ -31,13 +58,20 @@ class Command(BaseCommand):
         if not settings.TELETHON_RELINK_ENABLED:
             logger.info("Telethon/relink desativado por política; worker ocioso")
             while True:
-                time.sleep(300)
+                # Ocioso por política é estado saudável, e o batimento sai mesmo
+                # assim — senão "desligado de propósito" e "morto" ficam
+                # indistinguíveis para quem olha de fora.
+                st.write_state(JOB, fase="desligado",
+                               ultima_msg="Relink de canais desativado por política.")
+                time.sleep(_INTERVALO_OCIOSO)
         if not (settings.TELEGRAM_API_ID and settings.TELEGRAM_API_HASH
                 and settings.TELEGRAM_SESSION):
             logger.info("Telegram userbot nao configurado; worker ocioso")
             # Fica vivo mas ocioso (honcho reinicia se sair); evita crash-loop.
             while True:
-                time.sleep(300)
+                st.write_state(JOB, fase="desligado",
+                               ultima_msg="Telegram userbot não configurado.")
+                time.sleep(_INTERVALO_OCIOSO)
 
         # Import tardio: só exige telethon quando de fato configurado.
         from telethon.sync import TelegramClient
@@ -52,11 +86,15 @@ class Command(BaseCommand):
         client.start()
         try:
             while True:
+                st.write_state(JOB, fase="varrendo", erro="")
                 try:
                     self._varrer(client)
+                    st.write_state(JOB, fase="aguardando", erro="")
                 except Exception:
                     logger.error("Erro na varredura de canais:\n%s", traceback.format_exc())
-                time.sleep(tick)
+                    st.write_state(JOB, fase="aguardando",
+                                   erro="falha na varredura de canais")
+                _dormir_batendo(tick)
         finally:
             client.disconnect()
 

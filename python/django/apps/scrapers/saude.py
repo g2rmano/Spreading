@@ -253,11 +253,18 @@ SINAIS = (
 WORKERS = (
     ("scrape", "scrape", "Raspagem de ofertas"),
     ("scrape_rapido", "scrape", "Feed rápido de ofertas"),
-    ("links", "scrape", "Links de afiliado"),
+    # "links", não "scrape": a lane roda com `is_enabled("links")`, e essa
+    # função já herda de `scrape` enquanto a lane não recebe escolha própria.
+    # Ler a flag de `scrape` aqui fazia a Saúde divergir da realidade assim que
+    # alguém configurava Links — e o alarme "ligado mas morto" passava a ser
+    # calculado contra a flag errada.
+    ("links", "links", "Links de afiliado"),
     # O pipeline de cupons mantém a janela de preparo mesmo com a raspagem geral
     # desligada, portanto sua saúde não pode herdar a flag de ``scrape``.
     ("cupons", None, "Manutenção de cupons"),
     ("envio", "envio", "Envio de ofertas"),
+    # Sem flag: relink de canais é ligado por secret de política, não pela tela.
+    ("canais", None, "Canais monitorados"),
     ("relatorios", "relatorios", "Relatórios de comissão"),
     # Sem flag de propósito: monitorar conexão não pode depender de a automação
     # estar ligada. Se este morrer, o sistema fica cego para quedas.
